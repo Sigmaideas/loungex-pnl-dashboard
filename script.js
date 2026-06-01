@@ -18,6 +18,11 @@ const BARIS_API_BASE = (function () {
   return BARIS_API_PROXY.indexOf("http") === 0 ? BARIS_API_PROXY : BARIS_API_DIRECT;
 })();
 
+// 공유 클라우드 저장소(Cloudflare Worker + KV). 저장 시 모든 기기에서 공통으로 보임.
+const CLOUD_BASE = "https://loungex-baris-proxy.sigmaidea.workers.dev";
+const CLOUD_KEY_STORAGE = "loungex_cloud_key";
+const getCloudKey = () => (localStorage.getItem(CLOUD_KEY_STORAGE) || "").trim();
+
 const STORE_TYPE_DIRECT = "직영모델";
 const STORE_TYPE_OWNER = "점주투자모델";
 const STORE_TYPES = [STORE_TYPE_DIRECT, STORE_TYPE_OWNER];
@@ -161,6 +166,56 @@ function loadFromStorage() {
       return false;
     state.stores = parsed.stores;
     state.monthly = parsed.monthly;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* ============================================================
+ *  공유 클라우드 저장(모든 기기 공통)
+ * ============================================================ */
+// 현재 데이터를 클라우드에 저장. 공유 암호가 없으면 1회 입력받음.
+async function cloudSave() {
+  let key = getCloudKey();
+  if (!key) {
+    const entered = prompt("공유 암호를 입력하세요 (모든 기기에서 동일하게 사용):");
+    if (entered == null) return;
+    key = entered.trim();
+    if (!key) return;
+    localStorage.setItem(CLOUD_KEY_STORAGE, key);
+  }
+  try {
+    const r = await fetch(`${CLOUD_BASE}/__data`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Save-Key": key },
+      body: JSON.stringify({ stores: state.stores, monthly: state.monthly }),
+    });
+    if (r.status === 401) {
+      localStorage.removeItem(CLOUD_KEY_STORAGE);
+      showToast("공유 암호가 올바르지 않습니다. 저장을 다시 눌러 입력하세요.");
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    showToast("클라우드에 저장했습니다. 이제 모든 기기에서 공통으로 보입니다.");
+  } catch (e) {
+    showToast("저장 실패: " + (e.message || e));
+  }
+}
+
+// 클라우드에서 공유 데이터를 불러와 state에 반영. 암호 없거나 실패 시 false.
+async function cloudLoad() {
+  const key = getCloudKey();
+  if (!key) return false;
+  try {
+    const r = await fetch(`${CLOUD_BASE}/__data`, { headers: { "X-Save-Key": key } });
+    if (r.status === 401) { localStorage.removeItem(CLOUD_KEY_STORAGE); return false; }
+    if (!r.ok) return false;
+    const data = await r.json();
+    if (!Array.isArray(data.stores) || !Array.isArray(data.monthly)) return false;
+    state.stores = data.stores;
+    state.monthly = data.monthly;
+    saveToStorage();
     return true;
   } catch {
     return false;
@@ -1270,6 +1325,8 @@ function bindEvents() {
   });
 
 
+  document.getElementById("btn-save").addEventListener("click", cloudSave);
+
   document.getElementById("btn-reset").addEventListener("click", () => {
     openConfirm({
       title: "데이터 초기화",
@@ -1381,13 +1438,29 @@ function escapeHtml(s) {
  *  부트
  * ============================================================ */
 function init() {
-  // 초기 데이터 없음(빈 상태로 시작). 데이터는 "업데이트"로 바리스에서 가져오거나 직접 입력.
+  // 초기 데이터 없음(빈 상태로 시작). 데이터는 "업데이트"/직접 입력/클라우드에서 가져옴.
   loadFromStorage();
   if (state.stores.length > 0) ui.selectedStoreId = state.stores[0].id;
 
   initFilters();
   bindEvents();
   renderAll();
+
+  // 클라우드 공유 데이터가 있으면 자동으로 불러와 모든 기기에서 공통 표시
+  cloudLoad().then((loaded) => {
+    if (!loaded) return;
+    if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
+      ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;
+    }
+    const def = getDefaultFilter();
+    ui.filterStart = def.start;
+    ui.filterEnd = def.end;
+    const se = document.getElementById("filter-start");
+    const ee = document.getElementById("filter-end");
+    if (se) se.value = ui.filterStart;
+    if (ee) ee.value = ui.filterEnd;
+    renderAll();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

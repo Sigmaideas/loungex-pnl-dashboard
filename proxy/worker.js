@@ -26,8 +26,11 @@ const ALLOW_ORIGINS = [
   "http://127.0.0.1:8000",
 ];
 
+// 공유 데이터 저장 키(KV 안에서의 키 이름)
+const DATA_KEY = "dashboard";
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     const reqOrigin = request.headers.get("Origin") || "";
     const allowOrigin = ALLOW_ORIGINS.includes(reqOrigin) ? reqOrigin : ALLOW_ORIGINS[0];
@@ -35,7 +38,7 @@ export default {
     const cors = {
       "Access-Control-Allow-Origin": allowOrigin,
       "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, X-Save-Key",
       "Access-Control-Max-Age": "86400",
       "Vary": "Origin",
     };
@@ -45,6 +48,28 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
+    // ───────── 공유 데이터 저장/조회 (KV, 공유 암호로 보호) ─────────
+    if (url.pathname === "/__data") {
+      const jsonCors = { ...cors, "Content-Type": "application/json" };
+      const key = request.headers.get("X-Save-Key") || "";
+      // SAVE_KEY 비밀값과 일치해야 읽기/쓰기 허용
+      if (!env.SAVE_KEY || key !== env.SAVE_KEY) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: jsonCors });
+      }
+      if (request.method === "GET") {
+        const stored = await env.DATA.get(DATA_KEY);
+        return new Response(stored || JSON.stringify({ stores: [], monthly: [] }), { status: 200, headers: jsonCors });
+      }
+      if (request.method === "PUT" || request.method === "POST") {
+        const text = await request.text();
+        try { JSON.parse(text); } catch { return new Response(JSON.stringify({ error: "invalid_json" }), { status: 400, headers: jsonCors }); }
+        await env.DATA.put(DATA_KEY, text);
+        return new Response(JSON.stringify({ ok: true, savedAt: new Date().toISOString() }), { status: 200, headers: jsonCors });
+      }
+      return new Response(JSON.stringify({ error: "method_not_allowed" }), { status: 405, headers: jsonCors });
+    }
+
+    // ───────── 그 외: 바리스 API 프록시 ─────────
     // 대상 URL: 경로/쿼리 그대로 전달
     const target = TARGET + url.pathname + url.search;
 

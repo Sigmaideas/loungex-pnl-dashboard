@@ -2,3 +2,8 @@ name = "loungex-baris-proxy"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 workers_dev = true
+
+# 대시보드 공유 데이터 저장소 (모든 기기 공통)
+[[kv_namespaces]]
+binding = "DATA"
+id = "906fdfacc7bc4ffaae5767b4bae61c16"

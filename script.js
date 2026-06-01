@@ -6,7 +6,17 @@
 const STORAGE_KEY = "loungex_pnl_data";
 const DEFAULT_OP_RATE = 0.2;
 const DEFAULT_MONTHLY_LABOR = 3_000_000;
-const BARIS_API_BASE = "https://api-baris-v3-backoffice.xyzcorp.io";
+// 바리스 백오피스 API.
+//  - localhost: 서버가 localhost 출처를 허용하므로 직접 호출.
+//  - 그 외(github.io 등): 서버가 외부 출처를 Origin으로 차단하므로 프록시(Cloudflare Worker) 경유.
+//    프록시는 서버 측에서 Origin/Referer를 barison.xyzcorp.io로 바꿔 전달한다.
+const BARIS_API_DIRECT = "https://api-baris-v3-backoffice.xyzcorp.io";
+const BARIS_API_PROXY = "%%BARIS_PROXY_URL%%"; // 배포 후 Worker URL로 치환
+const BARIS_API_BASE = (function () {
+  const isLocal = ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (isLocal) return BARIS_API_DIRECT;
+  return BARIS_API_PROXY.indexOf("http") === 0 ? BARIS_API_PROXY : BARIS_API_DIRECT;
+})();
 
 const STORE_TYPE_DIRECT = "직영모델";
 const STORE_TYPE_OWNER = "점주투자모델";

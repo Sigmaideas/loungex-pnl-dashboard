@@ -174,63 +174,6 @@ function resetStorage() {
 }
 
 /* ============================================================
- *  샘플 데이터
- * ============================================================ */
-function seedSampleData() {
-  const seed = [
-    {
-      id: uid("s"),
-      name: "라운지엑스24h 강남점",
-      openDate: "2025-08-01",
-      openingProfit: 5_000_000,
-      operatingProfitRate: 0.20,
-      totalInvestment: 200_000_000,
-    },
-    {
-      id: uid("s"),
-      name: "라운지엑스24h 판교점",
-      openDate: "2025-11-15",
-      openingProfit: 4_500_000,
-      operatingProfitRate: 0.20,
-      totalInvestment: 180_000_000,
-    },
-    {
-      id: uid("s"),
-      name: "라운지엑스24h 홍대점",
-      openDate: "2026-02-01",
-      openingProfit: 4_000_000,
-      operatingProfitRate: 0.18,
-      totalInvestment: 150_000_000,
-    },
-  ];
-
-  const monthly = [];
-  const END_YM = "2026-04";
-
-  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-  const randFloat = (min, max) => Math.random() * (max - min) + min;
-
-  seed.forEach((store) => {
-    const startYM = ymOfDate(store.openDate);
-    const months = monthsRange(startYM, END_YM);
-    months.forEach((ym) => {
-      const revenue = randInt(15_000_000, 35_000_000);
-      const payoutRate = randFloat(0.3, 0.4);
-      monthly.push({
-        storeId: store.id,
-        yearMonth: ym,
-        revenue,
-        investorPayout: Math.round(revenue * payoutRate),
-      });
-    });
-  });
-
-  state.stores = seed;
-  state.monthly = monthly;
-  saveToStorage();
-}
-
-/* ============================================================
  *  계산
  * ============================================================ */
 function getMonthlyForStore(storeId) {
@@ -1035,17 +978,10 @@ async function barisChangeBranch(branchID, token) {
   return newToken;
 }
 
-async function importFromBaris({ account, password, token: presetToken, startYM, endYM, onProgress }) {
-  let token;
-  if (presetToken) {
-    // 토큰 직접 입력(이메일/비번 로그인이 불가한 계정용)
-    token = presetToken.trim().replace(/^Bearer\s+/i, "");
-    onProgress?.("토큰으로 접속 중...");
-  } else {
-    onProgress?.("로그인 중...");
-    const auth = await barisLogin(account, password);
-    token = auth.accessToken;
-  }
+async function importFromBaris({ account, password, startYM, endYM, onProgress }) {
+  onProgress?.("로그인 중...");
+  const auth = await barisLogin(account, password);
+  const token = auth.accessToken;
 
   onProgress?.("지점 목록 조회 중...");
   const owned = await barisFetchOwnBranches(token);
@@ -1224,8 +1160,6 @@ async function runBarisImport(importArgs, disableBtns) {
 
 function setBarisBtnsDisabled(v) {
   document.getElementById("btn-baris-submit").disabled = v;
-  const tb = document.getElementById("btn-baris-token");
-  if (tb) tb.disabled = v;
 }
 
 async function handleBarisSubmit() {
@@ -1241,17 +1175,6 @@ async function handleBarisSubmit() {
   // 비밀번호·ID 즉시 제거
   form.elements.password.value = "";
   form.elements.account.value = "";
-}
-
-async function handleBarisTokenSubmit() {
-  const input = document.getElementById("baris-token-input");
-  const token = (input.value || "").trim();
-  if (!token) {
-    setBarisStatus("액세스 토큰을 붙여넣으세요.", "error");
-    return;
-  }
-  await runBarisImport({ token }, setBarisBtnsDisabled);
-  input.value = ""; // 토큰 즉시 제거
 }
 
 /* ============================================================
@@ -1429,7 +1352,13 @@ function bindEvents() {
     e.preventDefault();
     handleBarisSubmit();
   });
-  document.getElementById("btn-baris-token").addEventListener("click", handleBarisTokenSubmit);
+
+  // ESC로 열려 있는 모달 닫기
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!document.getElementById("modal-baris").hidden) closeBarisModal();
+    if (!document.getElementById("modal").hidden) closeModal();
+  });
 
   // 편집
   attachEditableHandlers();
@@ -1452,11 +1381,8 @@ function escapeHtml(s) {
  *  부트
  * ============================================================ */
 function init() {
-  const loaded = loadFromStorage();
-  if (!loaded) {
-    // 최초 방문: 샘플 데이터 시드. 초기화 후에는 빈 상태로 유지됩니다.
-    seedSampleData();
-  }
+  // 초기 데이터 없음(빈 상태로 시작). 데이터는 "업데이트"로 바리스에서 가져오거나 직접 입력.
+  loadFromStorage();
   if (state.stores.length > 0) ui.selectedStoreId = state.stores[0].id;
 
   initFilters();

@@ -1179,7 +1179,7 @@ async function handleBarisSubmit() {
   const endYM = getCurrentYM();
 
   if (!account || !password) {
-    setBarisStatus("관리자 ID와 비밀번호를 입력하세요.", "error");
+    setBarisStatus("관리자 이메일과 비밀번호를 입력하세요.", "error");
     return;
   }
 

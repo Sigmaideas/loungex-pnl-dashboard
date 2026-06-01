@@ -1,0 +1,1421 @@
+/* ============================================================
+ * 라운지엑스24h P&L 대시보드
+ * 단일 정적 페이지. localStorage 자동 저장 + JSON 가져오기/내보내기.
+ * ============================================================ */
+
+const STORAGE_KEY = "loungex_pnl_data";
+const DEFAULT_OP_RATE = 0.2;
+const DEFAULT_MONTHLY_LABOR = 3_000_000;
+const BARIS_API_BASE = "https://api-baris-v3-backoffice.xyzcorp.io";
+
+const STORE_TYPE_DIRECT = "직영모델";
+const STORE_TYPE_OWNER = "점주투자모델";
+const STORE_TYPES = [STORE_TYPE_DIRECT, STORE_TYPE_OWNER];
+
+function getStoreType(store) {
+  return store?.type === STORE_TYPE_OWNER ? STORE_TYPE_OWNER : STORE_TYPE_DIRECT;
+}
+
+/* ---------- 상태 ---------- */
+const state = {
+  stores: [],   // {id, name, openDate, openingProfit, operatingProfitRate, totalInvestment}
+  monthly: [],  // {storeId, yearMonth, revenue, investorPayout}
+};
+
+const ui = {
+  filterStart: null,    // "YYYY-MM"
+  filterEnd: null,      // "YYYY-MM"
+  sortKey: "avgRevenue",
+  sortDir: "desc",
+  selectedStoreId: null,
+};
+
+let revenueChart = null;
+
+/* ============================================================
+ *  유틸 / 포맷
+ * ============================================================ */
+const uid = (prefix = "s") =>
+  `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+const formatCurrency = (n) => {
+  const v = Number(n) || 0;
+  return "₩" + Math.round(v).toLocaleString("ko-KR");
+};
+
+const formatNumber = (n) => (Number(n) || 0).toLocaleString("ko-KR");
+
+const formatPercent = (rate) => `${(rate * 100).toFixed(1)}%`;
+
+/**
+ * 수익률 표시: 100% 미만이면 100에서 부족한 만큼 "-N%"로 빨간 표시.
+ * 데이터 없음(투자금=0 등)이면 "-".
+ */
+/**
+ * 회수율 가로 막대: 0~200% 스케일, 100% 기준선이 중앙에 위치.
+ * 100% 이상 녹색, 미만 빨간색.
+ */
+function renderRecoveryBar(rate, hasInvestment) {
+  if (!hasInvestment) {
+    return '<span class="cell-readonly">-</span>';
+  }
+  const pct = rate * 100;
+  const fillWidth = Math.min(Math.max(pct, 0), 100); // 0~100% 스케일
+  const cls = rate >= 1 ? "pos" : "neg";
+  return `
+    <div class="recovery-bar" title="총 회수금액 / 총 투자금액">
+      <div class="recovery-bar-fill ${cls}" style="width:${fillWidth}%"></div>
+      <div class="recovery-bar-label">${pct.toFixed(1)}%</div>
+    </div>
+  `;
+}
+
+function formatRoiDisplay(roi, minPayout) {
+  if (!minPayout) return { text: "-", cls: "" };
+  if (roi < 1) {
+    return { text: `-${((1 - roi) * 100).toFixed(1)}%`, cls: "neg" };
+  }
+  return { text: `+${((roi - 1) * 100).toFixed(1)}%`, cls: "pos" };
+}
+
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
+const pad = (n) => String(n).padStart(2, "0");
+
+const ymOfDate = (isoDate) => isoDate?.slice(0, 7) || "";
+
+const daysBetween = (fromISO, toISO) => {
+  if (!fromISO) return 0;
+  const a = new Date(fromISO);
+  const b = new Date(toISO);
+  return Math.floor((b - a) / (1000 * 60 * 60 * 24));
+};
+
+/** 필터 [startYM, endYM] 와 매장 운영기간 [openDate, today] 의 교집합 일수 */
+function daysInFilteredWindow(openDate, startYM, endYM) {
+  if (!openDate || !startYM || !endYM) return 0;
+  const open = new Date(openDate);
+  const filterStart = new Date(`${startYM}-01T00:00:00`);
+  const [ey, em] = endYM.split("-").map(Number);
+  const filterEnd = new Date(ey, em, 0, 23, 59, 59, 999); // endYM 의 마지막 날
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  const effStart = open > filterStart ? open : filterStart;
+  const effEnd = today < filterEnd ? today : filterEnd;
+  if (effStart > effEnd) return 0;
+  return Math.floor((effEnd - effStart) / 86400000) + 1;
+}
+
+const monthsRange = (startYM, endYM) => {
+  const out = [];
+  if (!startYM || !endYM) return out;
+  const [sy, sm] = startYM.split("-").map(Number);
+  const [ey, em] = endYM.split("-").map(Number);
+  let y = sy, m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${pad(m)}`);
+    m++;
+    if (m > 12) { m = 1; y++; }
+  }
+  return out;
+};
+
+const inRange = (ym, startYM, endYM) => ym >= startYM && ym <= endYM;
+
+const parseNumberInput = (str) => {
+  if (str == null) return 0;
+  const cleaned = String(str).replace(/[^0-9.\-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/* ============================================================
+ *  저장 / 복원
+ * ============================================================ */
+function saveToStorage() {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({ stores: state.stores, monthly: state.monthly })
+  );
+}
+
+function loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.stores) || !Array.isArray(parsed.monthly))
+      return false;
+    state.stores = parsed.stores;
+    state.monthly = parsed.monthly;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resetStorage() {
+  localStorage.removeItem(STORAGE_KEY);
+  state.stores = [];
+  state.monthly = [];
+}
+
+/* ============================================================
+ *  샘플 데이터
+ * ============================================================ */
+function seedSampleData() {
+  const seed = [
+    {
+      id: uid("s"),
+      name: "라운지엑스24h 강남점",
+      openDate: "2025-08-01",
+      openingProfit: 5_000_000,
+      operatingProfitRate: 0.20,
+      totalInvestment: 200_000_000,
+    },
+    {
+      id: uid("s"),
+      name: "라운지엑스24h 판교점",
+      openDate: "2025-11-15",
+      openingProfit: 4_500_000,
+      operatingProfitRate: 0.20,
+      totalInvestment: 180_000_000,
+    },
+    {
+      id: uid("s"),
+      name: "라운지엑스24h 홍대점",
+      openDate: "2026-02-01",
+      openingProfit: 4_000_000,
+      operatingProfitRate: 0.18,
+      totalInvestment: 150_000_000,
+    },
+  ];
+
+  const monthly = [];
+  const END_YM = "2026-04";
+
+  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const randFloat = (min, max) => Math.random() * (max - min) + min;
+
+  seed.forEach((store) => {
+    const startYM = ymOfDate(store.openDate);
+    const months = monthsRange(startYM, END_YM);
+    months.forEach((ym) => {
+      const revenue = randInt(15_000_000, 35_000_000);
+      const payoutRate = randFloat(0.3, 0.4);
+      monthly.push({
+        storeId: store.id,
+        yearMonth: ym,
+        revenue,
+        investorPayout: Math.round(revenue * payoutRate),
+      });
+    });
+  });
+
+  state.stores = seed;
+  state.monthly = monthly;
+  saveToStorage();
+}
+
+/* ============================================================
+ *  계산
+ * ============================================================ */
+function getMonthlyForStore(storeId) {
+  return state.monthly
+    .filter((m) => m.storeId === storeId)
+    .sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+}
+
+function getStoreMetrics(store, startYM, endYM) {
+  const all = getMonthlyForStore(store.id);
+  const filtered = all.filter((m) => inRange(m.yearMonth, startYM, endYM));
+
+  const totalRevenue = filtered.reduce((s, m) => s + (m.revenue || 0), 0);
+  const totalRevenueAll = all.reduce((s, m) => s + (m.revenue || 0), 0);
+  const totalPayoutAll = all.reduce((s, m) => s + (m.investorPayout || 0), 0);
+  const totalPayoutFiltered = filtered.reduce((s, m) => s + (m.investorPayout || 0), 0);
+
+  const investment = store.totalInvestment || 0;
+  const opDays = store.openDate ? Math.max(0, daysBetween(store.openDate, todayISO())) : 0;
+
+  // 평균 매출 (월) = (누적 매출 / 운영일자) × 30
+  const avgMonthlyRevenue = opDays > 0 ? (totalRevenueAll / opDays) * 30 : 0;
+
+  // 식자재비 = 평균매출 × 30%
+  const materialCost = avgMonthlyRevenue * 0.3;
+
+  const minMonthlyPayout = investment / 60;
+  const avgMonthlyPayout = avgMonthlyRevenue * 0.9 * 0.2;
+  // 총 회수금액 = 누적 매출 × 90% × 20% (월별 실적의 투자자 회수금 공식과 동일)
+  const totalPayoutCalculated = totalRevenueAll * 0.9 * 0.2;
+  // 회수율 = 총 회수금액 / 총 투자금액
+  const recoveryRate = investment > 0 ? totalPayoutCalculated / investment : 0;
+
+  const roi = minMonthlyPayout > 0 ? avgMonthlyPayout / minMonthlyPayout : 0;
+
+  // 운영수익 = 평균매출×0.9 - 임대료 - 인건비 - 평균매출×0.9×0.3 - 평균회수금액
+  const operatingProfit = avgMonthlyRevenue * 0.9
+    - (store.monthlyRent || 0)
+    - (store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)
+    - avgMonthlyRevenue * 0.9 * 0.3
+    - avgMonthlyPayout;
+
+  const openingProfitInRange = 0; // 회사 P&L 에서 오픈수익 제외
+  const companyPnl = operatingProfit;
+
+  // ─ 필터 기간 기준 동일 공식 (KPI 카드에서 사용) ─
+  // 필터 운영일수 기반으로 30일 정규화 (all-time formula 와 동일한 스타일)
+  const filteredOpDays = daysInFilteredWindow(store.openDate, startYM, endYM);
+  const avgMonthlyRevenueFiltered = filteredOpDays > 0
+    ? (totalRevenue / filteredOpDays) * 30
+    : 0;
+  const avgMonthlyPayoutFiltered = avgMonthlyRevenueFiltered * 0.9 * 0.2;
+  const roiFiltered = minMonthlyPayout > 0
+    ? avgMonthlyPayoutFiltered / minMonthlyPayout
+    : 0;
+  const operatingProfitFiltered = avgMonthlyRevenueFiltered * 0.9
+    - (store.monthlyRent || 0)
+    - (store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)
+    - avgMonthlyRevenueFiltered * 0.9 * 0.3
+    - avgMonthlyPayoutFiltered;
+  const companyPnlFiltered = operatingProfitFiltered;
+
+  return {
+    totalRevenue,
+    totalRevenueAll,
+    totalPayoutFiltered,
+    totalPayoutAll,
+    operatingProfit,
+    openingProfitInRange,
+    companyPnl,
+    roi,
+    opDays,
+    minMonthlyPayout,
+    avgMonthlyPayout,
+    avgMonthlyRevenue,
+    totalPayoutCalculated,
+    recoveryRate,
+    materialCost,
+    roiFiltered,
+    companyPnlFiltered,
+  };
+}
+
+function getDataDateRange() {
+  if (state.monthly.length === 0) {
+    const now = new Date();
+    const ym = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+    return { min: ym, max: ym };
+  }
+  const yms = state.monthly.map((m) => m.yearMonth).sort();
+  return { min: yms[0], max: yms[yms.length - 1] };
+}
+
+function getRecentFilter(months) {
+  const { max } = getDataDateRange();
+  const [y, m] = max.split("-").map(Number);
+  let sy = y, sm = m - (months - 1);
+  while (sm <= 0) { sm += 12; sy--; }
+  return { start: `${sy}-${pad(sm)}`, end: max };
+}
+
+function getDefaultFilter() {
+  const { max } = getDataDateRange();
+  const start = "2026-01";
+  return { start, end: max < start ? start : max };
+}
+
+/* ============================================================
+ *  렌더 (전체)
+ * ============================================================ */
+function renderAll() {
+  const startYM = ui.filterStart;
+  const endYM = ui.filterEnd;
+
+  renderKPI(startYM, endYM);
+  renderChart(startYM, endYM);
+  renderStoreTable(startYM, endYM);
+  renderStoreSelect();
+  renderMonthlyTable();
+
+  document.getElementById("chart-period").textContent =
+    state.stores.length === 0 ? "" : `${startYM} ~ ${endYM}`;
+}
+
+/* ============================================================
+ *  KPI
+ * ============================================================ */
+function renderKPI(startYM, endYM) {
+  const totalStores = state.stores.length;
+
+  let totalRevenue = 0;
+  let totalCompanyPnl = 0;
+  let roiSum = 0;
+  let roiCount = 0;
+
+  state.stores.forEach((store) => {
+    const m = getStoreMetrics(store, startYM, endYM);
+    totalRevenue += m.totalRevenue;
+    // 총 회사 수익, 평균 수익률은 기간 필터와 무관하게 전체 기간 기준
+    totalCompanyPnl += m.companyPnl;
+    if ((store.totalInvestment || 0) > 0) {
+      roiSum += m.roi;
+      roiCount++;
+    }
+  });
+
+  const avgRoi = roiCount > 0 ? roiSum / roiCount : 0;
+
+  document.getElementById("kpi-stores").textContent = formatNumber(totalStores);
+  document.getElementById("kpi-revenue").textContent = formatCurrency(totalRevenue);
+
+  // 총 투자자 수익: 100% 기준으로 +초과분 / -부족분 표시
+  const roiEl = document.getElementById("kpi-roi");
+  if (roiCount === 0) {
+    roiEl.textContent = "-";
+    roiEl.classList.remove("pos", "neg");
+  } else {
+    const d = formatRoiDisplay(avgRoi, 1);
+    roiEl.textContent = d.text;
+    roiEl.classList.remove("pos", "neg");
+    if (d.cls) roiEl.classList.add(d.cls);
+  }
+
+  // 총 회사 수익: 음수면 빨간색
+  const companyEl = document.getElementById("kpi-company");
+  companyEl.textContent = formatCurrency(totalCompanyPnl);
+  companyEl.classList.toggle("neg", totalCompanyPnl < 0);
+}
+
+/* ============================================================
+ *  매장별 매출 비중 차트 (도넛)
+ * ============================================================ */
+function renderChart(startYM, endYM) {
+  const wrap = document.querySelector(".chart-card .chart-wrap");
+  if (!wrap) return;
+
+  // 평균 매출(월) 내림차순으로 정렬
+  const items = state.stores
+    .map((store) => {
+      const m = getStoreMetrics(store, startYM, endYM);
+      return {
+        name: store.name,
+        revenue: m.totalRevenue,
+        avgMonthlyRevenue: m.avgMonthlyRevenue,
+      };
+    })
+    .filter((x) => x.revenue > 0)
+    .sort((a, b) => b.avgMonthlyRevenue - a.avgMonthlyRevenue);
+
+  const labels = items.map((x) => x.name);
+  const values = items.map((x) => x.revenue);
+
+  // 데이터 없음 → 차트 제거 후 안내 표시
+  if (labels.length === 0) {
+    if (revenueChart) {
+      revenueChart.destroy();
+      revenueChart = null;
+    }
+    wrap.innerHTML = '<div class="empty-state">선택 기간에 매출 데이터가 없습니다.</div>';
+    return;
+  }
+
+  // 캔버스가 사라졌다면 복구
+  if (!document.getElementById("chart-revenue")) {
+    wrap.innerHTML = '<canvas id="chart-revenue"></canvas>';
+  }
+  const ctx = document.getElementById("chart-revenue");
+
+  const palette = [
+    "#296ff7", "#23a375", "#e0921a", "#e5484d",
+    "#8b5cf6", "#ec4899", "#14b8a6", "#f97316",
+    "#06b6d4", "#84cc16",
+  ];
+  const colors = labels.map((_, i) => palette[i % palette.length]);
+  const total = values.reduce((s, v) => s + v, 0);
+
+  const data = {
+    labels,
+    datasets: [{
+      data: values,
+      backgroundColor: colors,
+      borderColor: "#ffffff",
+      borderWidth: 2,
+    }],
+  };
+
+  const narrow = window.matchMedia("(max-width: 760px)").matches;
+  const options = {
+    responsive: true,
+    maintainAspectRatio: false,
+    cutout: "60%",
+    plugins: {
+      legend: {
+        position: narrow ? "bottom" : "right",
+        labels: {
+          color: "#495057",
+          font: { size: 12, family: "inherit" },
+          padding: 12,
+          generateLabels: (chart) => {
+            const ds = chart.data.datasets[0];
+            const t = (ds.data || []).reduce((s, v) => s + (v || 0), 0);
+            return chart.data.labels.map((label, i) => {
+              const v = ds.data[i] || 0;
+              const pct = t > 0 ? ((v / t) * 100).toFixed(1) : "0.0";
+              return {
+                text: `${label}  ${pct}%`,
+                fillStyle: ds.backgroundColor[i],
+                strokeStyle: ds.backgroundColor[i],
+                lineWidth: 0,
+                fontColor: "#495057",
+                index: i,
+              };
+            });
+          },
+        },
+      },
+      tooltip: {
+        backgroundColor: "#343a46",
+        titleColor: "#ffffff",
+        bodyColor: "#ffffff",
+        borderColor: "#343a46",
+        borderWidth: 1,
+        padding: 10,
+        callbacks: {
+          label: (c) => {
+            const v = c.parsed || 0;
+            const pct = total > 0 ? ((v / total) * 100).toFixed(1) : "0.0";
+            return `${c.label}: ${formatCurrency(v)} (${pct}%)`;
+          },
+        },
+      },
+    },
+  };
+
+  if (revenueChart && revenueChart.canvas === ctx) {
+    revenueChart.data = data;
+    revenueChart.options = options;
+    revenueChart.update();
+  } else {
+    if (revenueChart) revenueChart.destroy();
+    revenueChart = new Chart(ctx, { type: "doughnut", data, options });
+  }
+}
+
+/* ============================================================
+ *  공통: 현재 ui.sortKey/sortDir 기준으로 정렬된 지점 행
+ * ============================================================ */
+function getSortedStoreRows(startYM, endYM) {
+  const rows = state.stores.map((store) => {
+    const m = getStoreMetrics(store, startYM, endYM);
+    return { store, ...m };
+  });
+  rows.sort((a, b) => {
+    const dir = ui.sortDir === "asc" ? 1 : -1;
+    let av, bv;
+    switch (ui.sortKey) {
+      case "name": av = a.store.name; bv = b.store.name; break;
+      case "type": av = getStoreType(a.store); bv = getStoreType(b.store); break;
+      case "openDate": av = a.store.openDate || ""; bv = b.store.openDate || ""; break;
+      case "opDays": av = a.opDays; bv = b.opDays; break;
+      case "totalInvestment": av = a.store.totalInvestment || 0; bv = b.store.totalInvestment || 0; break;
+      case "totalPayout": av = a.totalPayoutCalculated; bv = b.totalPayoutCalculated; break;
+      case "recoveryRate": av = a.recoveryRate; bv = b.recoveryRate; break;
+      case "avgRevenue": av = a.avgMonthlyRevenue; bv = b.avgMonthlyRevenue; break;
+      case "monthlyRent": av = a.store.monthlyRent || 0; bv = b.store.monthlyRent || 0; break;
+      case "monthlyLabor": av = a.store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR; bv = b.store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR; break;
+      case "materialCost": av = a.materialCost; bv = b.materialCost; break;
+      case "minPayout": av = a.minMonthlyPayout; bv = b.minMonthlyPayout; break;
+      case "avgPayout": av = a.avgMonthlyPayout; bv = b.avgMonthlyPayout; break;
+      case "roi": av = a.roi; bv = b.roi; break;
+      case "companyPnl": av = a.companyPnl; bv = b.companyPnl; break;
+      default: av = a.store.name; bv = b.store.name;
+    }
+    if (typeof av === "string") return av.localeCompare(bv) * dir;
+    return (av - bv) * dir;
+  });
+  return rows;
+}
+
+/* ============================================================
+ *  지점 상세 테이블
+ * ============================================================ */
+function renderStoreTable(startYM, endYM) {
+  const tbody = document.getElementById("store-tbody");
+  const tfoot = document.getElementById("store-tfoot");
+
+  if (state.stores.length === 0) {
+    tbody.innerHTML =
+      '<tr><td colspan="15" class="empty-state">아직 등록된 지점이 없습니다. "+ 지점 추가" 버튼으로 시작하세요.</td></tr>';
+    tfoot.innerHTML = "";
+    updateSortHeaders();
+    return;
+  }
+
+  const rows = getSortedStoreRows(startYM, endYM);
+
+  tbody.innerHTML = rows.map(({ store, ...m }) => `
+    <tr data-store-id="${store.id}">
+      <td><span class="cell-editable" data-edit="store" data-field="name" data-id="${store.id}">${escapeHtml(store.name)}</span></td>
+      <td><span class="cell-editable" data-edit="store" data-field="openDate" data-id="${store.id}" data-input-type="date">${store.openDate || "-"}</span></td>
+      <td class="num cell-readonly">${formatNumber(m.opDays)}일</td>
+      <td class="num center"><span class="cell-editable" data-edit="store" data-field="totalInvestment" data-id="${store.id}" data-input-type="number">${formatCurrency(store.totalInvestment)}</span></td>
+      <td class="num center cell-readonly">${formatCurrency(m.totalPayoutCalculated)}</td>
+      <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
+      <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue)}</td>
+      <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
+      <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyLabor" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)}</span></td>
+      <td class="num center cell-readonly">${formatCurrency(m.materialCost)}</td>
+      <td class="num center cell-readonly">${formatCurrency(m.minMonthlyPayout)}</td>
+      <td class="num center cell-readonly ${m.avgMonthlyPayout >= m.minMonthlyPayout && m.minMonthlyPayout > 0 ? "pos" : ""}">${formatCurrency(m.avgMonthlyPayout)}</td>
+      <td class="num cell-readonly ${formatRoiDisplay(m.roi, m.minMonthlyPayout).cls}">${formatRoiDisplay(m.roi, m.minMonthlyPayout).text}</td>
+      <td>
+        <div class="pnl-stack">
+          <div class="pnl-line ${m.operatingProfit < 0 ? "neg" : "accent"}">
+            <span class="label">운영수익</span>
+            <span class="value">${formatCurrency(m.operatingProfit)}</span>
+          </div>
+        </div>
+      </td>
+      <td class="col-action">
+        <button class="btn-icon" data-delete-store="${store.id}" title="지점 삭제">×</button>
+      </td>
+    </tr>
+  `).join("");
+
+  // 합계
+  const sum = rows.reduce((acc, r) => {
+    acc.investment += r.store.totalInvestment || 0;
+    acc.totalPayout += r.totalPayoutCalculated;
+    acc.monthlyRent += r.store.monthlyRent || 0;
+    acc.monthlyLabor += r.store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR;
+    acc.materialCost += r.materialCost;
+    acc.revenueAll += r.totalRevenueAll;
+    acc.payoutAll += r.totalPayoutAll;
+    acc.minPayout += r.minMonthlyPayout;
+    acc.openingProfit += r.openingProfitInRange;
+    acc.operatingProfit += r.operatingProfit;
+    acc.companyPnl += r.companyPnl;
+    acc.monthsCount += getMonthlyForStore(r.store.id).length;
+    acc.avgRevenue += r.avgMonthlyRevenue;
+    return acc;
+  }, { investment: 0, totalPayout: 0, monthlyRent: 0, monthlyLabor: 0, materialCost: 0, revenueAll: 0, payoutAll: 0, minPayout: 0, openingProfit: 0, operatingProfit: 0, companyPnl: 0, monthsCount: 0, avgRevenue: 0 });
+
+  const avgRevenueAll = sum.avgRevenue;
+  const avgPayoutAll = avgRevenueAll * 0.9 * 0.2;
+  const aggregateMinPayout = sum.investment / 60;
+  const avgRoi = aggregateMinPayout > 0 ? avgPayoutAll / aggregateMinPayout : 0;
+
+  tfoot.innerHTML = `
+    <tr>
+      <td>합계</td>
+      <td></td>
+      <td></td>
+      <td class="num center">${formatCurrency(sum.investment)}</td>
+      <td class="num center">${formatCurrency(sum.totalPayout)}</td>
+      <td class="num center">${renderRecoveryBar(sum.investment > 0 ? sum.totalPayout / sum.investment : 0, sum.investment > 0)}</td>
+      <td class="num center">${formatCurrency(avgRevenueAll)}</td>
+      <td class="num center">${formatCurrency(sum.monthlyRent)}</td>
+      <td class="num center">${formatCurrency(sum.monthlyLabor)}</td>
+      <td class="num center">${formatCurrency(sum.materialCost)}</td>
+      <td class="num center">${formatCurrency(sum.minPayout)}</td>
+      <td class="num center ${avgPayoutAll >= sum.minPayout / Math.max(rows.length, 1) ? "pos" : ""}">${formatCurrency(avgPayoutAll)}</td>
+      <td class="num ${formatRoiDisplay(avgRoi, aggregateMinPayout).cls}">${formatRoiDisplay(avgRoi, aggregateMinPayout).text}</td>
+      <td>
+        <div class="pnl-stack">
+          <div class="pnl-line ${sum.operatingProfit < 0 ? "neg" : "accent"}"><span class="label">운영수익</span><span class="value">${formatCurrency(sum.operatingProfit)}</span></div>
+        </div>
+      </td>
+      <td></td>
+    </tr>
+  `;
+
+  updateSortHeaders();
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll("#store-table thead th[data-sort]").forEach((th) => {
+    th.classList.remove("sorted");
+    th.removeAttribute("data-arrow");
+    if (th.dataset.sort === ui.sortKey) {
+      th.classList.add("sorted");
+      th.setAttribute("data-arrow", ui.sortDir === "asc" ? "↑" : "↓");
+    }
+  });
+}
+
+/* ============================================================
+ *  월별 실적 테이블
+ * ============================================================ */
+function renderStoreSelect() {
+  const sel = document.getElementById("monthly-store-select");
+  if (state.stores.length === 0) {
+    sel.innerHTML = '<option value="">— 등록된 지점 없음 —</option>';
+    ui.selectedStoreId = null;
+    return;
+  }
+
+  // 지점 상세 테이블과 동일한 정렬 순서
+  const sorted = getSortedStoreRows(ui.filterStart, ui.filterEnd).map((r) => r.store);
+
+  if (!ui.selectedStoreId || !sorted.find((s) => s.id === ui.selectedStoreId)) {
+    ui.selectedStoreId = sorted[0].id;
+  }
+  sel.innerHTML = sorted
+    .map((s) => `<option value="${s.id}" ${s.id === ui.selectedStoreId ? "selected" : ""}>${escapeHtml(s.name)}</option>`)
+    .join("");
+}
+
+function renderMonthlyTable() {
+  const tbody = document.getElementById("monthly-tbody");
+  const tfoot = document.getElementById("monthly-tfoot");
+
+  const store = state.stores.find((s) => s.id === ui.selectedStoreId);
+  if (!store) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">먼저 지점을 추가하세요.</td></tr>';
+    tfoot.innerHTML = "";
+    return;
+  }
+
+  const rows = getMonthlyForStore(store.id);
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">해당 지점의 월별 실적이 없습니다. "+ 월 추가" 버튼으로 시작하세요.</td></tr>';
+    tfoot.innerHTML = "";
+    return;
+  }
+
+  tbody.innerHTML = rows.map((m) => {
+    const opProfit = (m.revenue || 0) * 0.9 * 0.1;  // 운영수익 = 매출 × 90% × 10% (= 9%)
+    const payout = (m.revenue || 0) * 0.9 * 0.2;    // 투자자 회수금 = 매출 × 90% × 20% (= 18%)
+    return `
+      <tr data-month-key="${store.id}|${m.yearMonth}">
+        <td><span class="cell-editable" data-edit="monthly" data-field="yearMonth" data-store-id="${store.id}" data-key="${m.yearMonth}" data-input-type="month">${m.yearMonth}</span></td>
+        <td class="num"><span class="cell-editable" data-edit="monthly" data-field="revenue" data-store-id="${store.id}" data-key="${m.yearMonth}" data-input-type="number">${formatCurrency(m.revenue)}</span></td>
+        <td class="num cell-readonly">${formatCurrency(payout)}</td>
+        <td class="num cell-readonly accent" style="color: var(--accent);">${formatCurrency(opProfit)}</td>
+        <td class="col-action">
+          <button class="btn-icon" data-delete-month="${store.id}|${m.yearMonth}" title="월 삭제">×</button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  const totalRev = rows.reduce((s, m) => s + (m.revenue || 0), 0);
+  const totalPayout = totalRev * 0.9 * 0.2; // 회수금 = 매출 × 90% × 20%
+  const totalOp = totalRev * 0.9 * 0.1;     // 운영수익 = 매출 × 90% × 10%
+
+  tfoot.innerHTML = `
+    <tr>
+      <td>합계</td>
+      <td class="num">${formatCurrency(totalRev)}</td>
+      <td class="num">${formatCurrency(totalPayout)}</td>
+      <td class="num" style="color: var(--accent);">${formatCurrency(totalOp)}</td>
+      <td></td>
+    </tr>
+  `;
+}
+
+/* ============================================================
+ *  편집 (더블클릭 → input)
+ * ============================================================ */
+function attachEditableHandlers() {
+  document.body.addEventListener("dblclick", (e) => {
+    const cell = e.target.closest(".cell-editable");
+    if (!cell || cell.querySelector("input")) return;
+    startEditing(cell);
+  });
+}
+
+function startEditing(cell) {
+  const inputType = cell.dataset.inputType || "text";
+  const editKind = cell.dataset.edit;
+  const field = cell.dataset.field;
+
+  let originalValue, htmlInput;
+
+  if (editKind === "store") {
+    const store = state.stores.find((s) => s.id === cell.dataset.id);
+    if (!store) return;
+    originalValue = store[field];
+  } else if (editKind === "monthly") {
+    const m = state.monthly.find(
+      (x) => x.storeId === cell.dataset.storeId && x.yearMonth === cell.dataset.key
+    );
+    if (!m) return;
+    originalValue = m[field];
+  }
+
+  if (inputType === "number") {
+    htmlInput = document.createElement("input");
+    htmlInput.type = "number";
+    htmlInput.step = "any";
+    htmlInput.value = Number(originalValue) || 0;
+  } else if (inputType === "rate") {
+    htmlInput = document.createElement("input");
+    htmlInput.type = "number";
+    htmlInput.step = "0.01";
+    htmlInput.min = "0";
+    htmlInput.max = "100";
+    htmlInput.value = ((Number(originalValue) || 0) * 100).toFixed(2);
+  } else if (inputType === "date") {
+    htmlInput = document.createElement("input");
+    htmlInput.type = "date";
+    htmlInput.value = originalValue || "";
+  } else if (inputType === "month") {
+    htmlInput = document.createElement("input");
+    htmlInput.type = "month";
+    htmlInput.value = originalValue || "";
+  } else {
+    htmlInput = document.createElement("input");
+    htmlInput.type = "text";
+    htmlInput.value = originalValue || "";
+  }
+
+  htmlInput.className = "cell-input";
+  cell.innerHTML = "";
+  cell.appendChild(htmlInput);
+  htmlInput.focus();
+  if (htmlInput.select) htmlInput.select();
+
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    let newValue = htmlInput.value;
+    if (inputType === "number") newValue = parseNumberInput(newValue);
+    else if (inputType === "rate") newValue = parseNumberInput(newValue) / 100;
+
+    applyEdit(editKind, cell, field, newValue);
+  };
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    renderAll();
+  };
+
+  htmlInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+  });
+  htmlInput.addEventListener("blur", commit);
+}
+
+function applyEdit(editKind, cell, field, newValue) {
+  if (editKind === "store") {
+    const store = state.stores.find((s) => s.id === cell.dataset.id);
+    if (!store) return;
+    store[field] = newValue;
+  } else if (editKind === "monthly") {
+    const m = state.monthly.find(
+      (x) => x.storeId === cell.dataset.storeId && x.yearMonth === cell.dataset.key
+    );
+    if (!m) return;
+    if (field === "yearMonth") {
+      const dup = state.monthly.find(
+        (x) => x.storeId === m.storeId && x.yearMonth === newValue && x !== m
+      );
+      if (dup) {
+        showToast("이미 같은 연월의 데이터가 있습니다.");
+        renderAll();
+        return;
+      }
+    }
+    m[field] = newValue;
+  }
+  saveToStorage();
+  renderAll();
+}
+
+/* ============================================================
+ *  CRUD
+ * ============================================================ */
+function addStore() {
+  const newStore = {
+    id: uid("s"),
+    name: `새 지점 ${state.stores.length + 1}`,
+    type: STORE_TYPE_DIRECT,
+    openDate: todayISO(),
+    openingProfit: 0,
+    operatingProfitRate: DEFAULT_OP_RATE,
+    totalInvestment: 0,
+    monthlyRent: 0,
+    monthlyLabor: DEFAULT_MONTHLY_LABOR,
+  };
+  state.stores.push(newStore);
+  ui.selectedStoreId = newStore.id;
+  saveToStorage();
+  renderAll();
+  showToast("지점이 추가되었습니다.");
+}
+
+function toggleStoreType(id) {
+  const store = state.stores.find((s) => s.id === id);
+  if (!store) return;
+  const current = getStoreType(store);
+  store.type = current === STORE_TYPE_DIRECT ? STORE_TYPE_OWNER : STORE_TYPE_DIRECT;
+  saveToStorage();
+  renderAll();
+}
+
+function deleteStore(id) {
+  openConfirm({
+    title: "지점 삭제",
+    message: "이 지점과 관련 월별 실적이 모두 삭제됩니다. 계속하시겠습니까?",
+    onConfirm: () => {
+      state.stores = state.stores.filter((s) => s.id !== id);
+      state.monthly = state.monthly.filter((m) => m.storeId !== id);
+      if (ui.selectedStoreId === id) ui.selectedStoreId = state.stores[0]?.id || null;
+      saveToStorage();
+      renderAll();
+      showToast("삭제되었습니다.");
+    },
+  });
+}
+
+function addMonth() {
+  if (!ui.selectedStoreId) {
+    showToast("먼저 지점을 추가하세요.");
+    return;
+  }
+  const existing = getMonthlyForStore(ui.selectedStoreId);
+  let nextYM;
+  if (existing.length > 0) {
+    const last = existing[existing.length - 1].yearMonth;
+    let [y, m] = last.split("-").map(Number);
+    m++; if (m > 12) { m = 1; y++; }
+    nextYM = `${y}-${pad(m)}`;
+  } else {
+    const today = new Date();
+    nextYM = `${today.getFullYear()}-${pad(today.getMonth() + 1)}`;
+  }
+  if (state.monthly.find((x) => x.storeId === ui.selectedStoreId && x.yearMonth === nextYM)) {
+    showToast("이미 존재하는 연월입니다. 더블클릭으로 연월을 변경하세요.");
+    return;
+  }
+  state.monthly.push({
+    storeId: ui.selectedStoreId,
+    yearMonth: nextYM,
+    revenue: 0,
+    investorPayout: 0,
+  });
+  saveToStorage();
+  renderAll();
+}
+
+function deleteMonth(storeId, yearMonth) {
+  state.monthly = state.monthly.filter(
+    (m) => !(m.storeId === storeId && m.yearMonth === yearMonth)
+  );
+  saveToStorage();
+  renderAll();
+}
+
+/* ============================================================
+ *  바리스 API 임포트
+ * ============================================================ */
+/**
+ * 바리스 API 호출 정책:
+ *   - 운영 데이터(주문/메뉴/가격/키오스크/로봇 등)에 영향 주는 쓰기 호출은 절대 사용 금지.
+ *   - 허용되는 비-GET 호출은 다음 두 개로 엄격히 제한:
+ *       1) POST /xmanager/login/web   : 로그인 (인증 토큰 발급)
+ *       2) PUT  /xmanager/branches/change : 현재 세션의 "보고 있는 지점" 전환
+ *          ↳ 비즈니스 데이터를 변경하지 않으며 매장 운영에 영향 없음.
+ *            다지점 매출을 단일 로그인으로 읽기 위해서만 사용.
+ *   - 그 외 매출/지점 정보 조회는 모두 GET 사용.
+ */
+async function barisLogin(account, password) {
+  const r = await fetch(`${BARIS_API_BASE}/xmanager/login/web`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ account, password }),
+  });
+  if (!r.ok) throw new Error(`로그인 실패 (HTTP ${r.status})`);
+  const j = await r.json();
+  const payload = j?.payload;
+  if (!payload?.accessToken) throw new Error("로그인 응답에 토큰이 없습니다.");
+  if (!payload?.branchID) throw new Error("로그인 응답에 지점 정보가 없습니다.");
+  return payload; // { accessToken, branchID, name, managerID, ... }
+}
+
+async function barisGet(path, token) {
+  const r = await fetch(`${BARIS_API_BASE}${path}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error(`API 오류 ${r.status}: ${path}`);
+  return r.json();
+}
+
+/**
+ * 매출 조회.
+ *  - 과거 월: tot_sell_month_predict (예상매출).
+ *    : 0매출 일자를 비-0 일평균으로 채워 추정. 월 중간 오픈 케이스 처리.
+ *  - 현재(진행 중)/미래 월: tot_sell_month - tot_refund_month (실제 누적).
+ *    : 며칠 안 지난 시점에서의 과대 추정 방지.
+ */
+async function barisFetchMonthRevenue(branchID, ym, token) {
+  const yyyymm = ym.replace("-", "");
+  const j = await barisGet(`/analysis/sales/calendar/${branchID}/${yyyymm}`, token);
+  const p = j?.payload || {};
+  const actual = Number(p.tot_sell_month || 0);
+  const refund = Number(p.tot_refund_month || 0);
+  const predict = Number(p.tot_sell_month_predict || 0);
+
+  if (!isMonthInProgressOrFuture(ym) && predict > 0) {
+    return predict;
+  }
+  return Math.max(0, actual - refund);
+}
+
+function isMonthInProgressOrFuture(ym) {
+  const now = new Date();
+  const curYM = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+  return ym >= curYM;
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+const BARIS_BRAND_FILTER = "라운지엑스24h";
+
+async function barisFetchOwnBranches(token) {
+  const j = await barisGet("/xmanager/branches/own", token);
+  return Array.isArray(j?.payload) ? j.payload : [];
+}
+
+/**
+ * 세션의 "현재 지점"을 바꾸고 새 토큰을 받음. 비즈니스 데이터에 영향 없음.
+ * 다지점 매출을 읽기 위해서만 사용. 다른 쓰기 호출은 절대 추가하지 말 것.
+ */
+async function barisChangeBranch(branchID, token) {
+  const r = await fetch(`${BARIS_API_BASE}/xmanager/branches/change`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ branch_id: branchID }),
+  });
+  if (!r.ok) throw new Error(`지점 전환 실패 (HTTP ${r.status}): ${branchID}`);
+  const j = await r.json();
+  const newToken = j?.payload?.accessToken;
+  if (!newToken) throw new Error(`지점 전환 응답에 토큰이 없습니다: ${branchID}`);
+  return newToken;
+}
+
+async function importFromBaris({ account, password, startYM, endYM, onProgress }) {
+  onProgress?.("로그인 중...");
+  const auth = await barisLogin(account, password);
+  const token = auth.accessToken;
+
+  onProgress?.("지점 목록 조회 중...");
+  const owned = await barisFetchOwnBranches(token);
+
+  // "라운지엑스24h" 포함된 지점만 대상
+  const targets = owned.filter((b) =>
+    (b.branchNmKo || "").includes(BARIS_BRAND_FILTER) ||
+    (b.branchNmEn || "").includes(BARIS_BRAND_FILTER)
+  );
+
+  if (targets.length === 0) {
+    const ownedSummary = owned
+      .map((b) => `${b.branchID}=${b.branchNmKo || b.branchNmEn || "(이름없음)"}`)
+      .join(", ");
+    throw new Error(
+      `"${BARIS_BRAND_FILTER}" 포함된 지점이 없습니다.\n소유 지점: ${ownedSummary || "(없음)"}`
+    );
+  }
+
+  const months = monthsRange(startYM, endYM);
+  const total = targets.length * months.length;
+  let done = 0;
+  const branchResults = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const b = targets[i];
+    const branchName = b.branchNmKo || b.branchNmEn || b.branchID;
+
+    onProgress?.(`(${i + 1}/${targets.length}) ${branchName} 세션 전환 중...`);
+    let branchToken;
+    try {
+      branchToken = await barisChangeBranch(b.branchID, token);
+    } catch (e) {
+      onProgress?.(`${branchName} 건너뜀: ${e.message}`);
+      done += months.length;
+      continue;
+    }
+
+    onProgress?.(`(${i + 1}/${targets.length}) ${branchName} 매출 조회 중...`);
+    const monthResults = await runWithConcurrency(months, 6, async (ym) => {
+      try {
+        const revenue = await barisFetchMonthRevenue(b.branchID, ym, branchToken);
+        return { ym, revenue };
+      } catch {
+        return { ym, revenue: 0 };
+      } finally {
+        done++;
+        if (done % 5 === 0 || done === total) {
+          onProgress?.(`매출 조회 중... ${done}/${total}`);
+        }
+      }
+    });
+
+    let firstYM = null;
+    const monthly = [];
+    for (const { ym, revenue } of monthResults) {
+      if (revenue > 0) {
+        if (!firstYM || ym < firstYM) firstYM = ym;
+        monthly.push({ storeId: b.branchID, yearMonth: ym, revenue, investorPayout: 0 });
+      }
+    }
+
+    branchResults.push({
+      branchID: b.branchID,
+      branchName,
+      firstYM,
+      monthly,
+      monthCount: monthly.length,
+    });
+  }
+
+  return { branches: branchResults };
+}
+
+/** 단일 지점 결과를 기존 상태에 안전하게 병합 */
+function mergeBarisResult(result) {
+  const { branchID, branchName, firstYM, monthly } = result;
+
+  // 1) stores: 이미 있으면 보존(투자금/오픈수익/오픈일 등 사용자 입력 유지), 없으면 추가
+  const existing = state.stores.find((s) => s.id === branchID);
+  if (!existing) {
+    state.stores.push({
+      id: branchID,
+      name: branchName,
+      type: STORE_TYPE_DIRECT,
+      openDate: firstYM ? `${firstYM}-01` : todayISO(),
+      openingProfit: 0,
+      operatingProfitRate: DEFAULT_OP_RATE,
+      totalInvestment: 0,
+      monthlyRent: 0,
+      monthlyLabor: DEFAULT_MONTHLY_LABOR,
+    });
+  } else if (!existing.name) {
+    existing.name = branchName;
+  }
+
+  // 2) monthly: 해당 지점의 month는 매출만 갱신, investorPayout(사용자 입력)는 보존
+  const incomingByYM = new Map(monthly.map((m) => [m.yearMonth, m.revenue]));
+  // 기존 항목 업데이트
+  for (const m of state.monthly) {
+    if (m.storeId === branchID && incomingByYM.has(m.yearMonth)) {
+      m.revenue = incomingByYM.get(m.yearMonth);
+      incomingByYM.delete(m.yearMonth);
+    }
+  }
+  // 신규 월 추가
+  for (const [ym, revenue] of incomingByYM) {
+    state.monthly.push({ storeId: branchID, yearMonth: ym, revenue, investorPayout: 0 });
+  }
+
+  if (!ui.selectedStoreId) ui.selectedStoreId = branchID;
+}
+
+/* ============================================================
+ *  바리스 모달
+ * ============================================================ */
+function openBarisModal() {
+  const modal = document.getElementById("modal-baris");
+  const form = document.getElementById("baris-form");
+  form.reset();
+  setBarisStatus("", "");
+  modal.hidden = false;
+  setTimeout(() => form.elements.account.focus(), 50);
+}
+
+const BARIS_DEFAULT_START_YM = "2026-01";
+function getCurrentYM() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+}
+
+function closeBarisModal() {
+  document.getElementById("modal-baris").hidden = true;
+}
+
+function setBarisStatus(text, kind = "") {
+  const el = document.getElementById("baris-status");
+  el.textContent = text || "";
+  el.className = "baris-status" + (kind ? ` ${kind}` : "");
+}
+
+async function handleBarisSubmit() {
+  const form = document.getElementById("baris-form");
+  const submitBtn = document.getElementById("btn-baris-submit");
+  const account = form.elements.account.value.trim();
+  const password = form.elements.password.value;
+  const startYM = BARIS_DEFAULT_START_YM;
+  const endYM = getCurrentYM();
+
+  if (!account || !password) {
+    setBarisStatus("관리자 ID와 비밀번호를 입력하세요.", "error");
+    return;
+  }
+
+  submitBtn.disabled = true;
+  try {
+    const result = await importFromBaris({
+      account, password, startYM, endYM,
+      onProgress: (msg) => setBarisStatus(msg, ""),
+    });
+    // 비밀번호와 ID 즉시 제거 (다음 지점 로그인을 위해)
+    form.elements.password.value = "";
+    form.elements.account.value = "";
+
+    for (const b of result.branches) mergeBarisResult(b);
+    const def = getDefaultFilter();
+    ui.filterStart = def.start;
+    ui.filterEnd = def.end;
+    document.getElementById("filter-start").value = ui.filterStart;
+    document.getElementById("filter-end").value = ui.filterEnd;
+    saveToStorage();
+    renderAll();
+
+    const totalMonthly = result.branches.reduce((s, b) => s + b.monthCount, 0);
+    const names = result.branches.map((b) => b.branchName).join(", ");
+    setBarisStatus(
+      `✓ ${result.branches.length}개 지점 / 매출 ${totalMonthly}건 업데이트 완료.\n${names}`,
+      "ok"
+    );
+    showToast(`${result.branches.length}개 지점을 업데이트했습니다.`);
+    setTimeout(closeBarisModal, 1800);
+  } catch (err) {
+    setBarisStatus(err.message || String(err), "error");
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+/* ============================================================
+ *  모달 / 토스트
+ * ============================================================ */
+let modalConfirmHandler = null;
+
+function openConfirm({ title, message, onConfirm }) {
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-message").textContent = message;
+  modalConfirmHandler = onConfirm;
+  document.getElementById("modal").hidden = false;
+}
+
+function closeModal() {
+  document.getElementById("modal").hidden = true;
+  modalConfirmHandler = null;
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2400);
+}
+
+/* ============================================================
+ *  필터
+ * ============================================================ */
+function initFilters() {
+  const def = getDefaultFilter();
+  ui.filterStart = def.start;
+  ui.filterEnd = def.end;
+
+  const startEl = document.getElementById("filter-start");
+  const endEl = document.getElementById("filter-end");
+  startEl.value = ui.filterStart;
+  endEl.value = ui.filterEnd;
+
+  startEl.addEventListener("change", (e) => {
+    ui.filterStart = e.target.value || ui.filterStart;
+    if (ui.filterStart > ui.filterEnd) ui.filterStart = ui.filterEnd;
+    startEl.value = ui.filterStart;
+    renderAll();
+  });
+  endEl.addEventListener("change", (e) => {
+    ui.filterEnd = e.target.value || ui.filterEnd;
+    if (ui.filterEnd < ui.filterStart) ui.filterEnd = ui.filterStart;
+    endEl.value = ui.filterEnd;
+    renderAll();
+  });
+
+  document.getElementById("btn-all-period").addEventListener("click", () => {
+    const r = getDataDateRange();
+    ui.filterStart = r.min;
+    ui.filterEnd = r.max;
+    startEl.value = r.min;
+    endEl.value = r.max;
+    renderAll();
+  });
+
+  const applyRecent = (months) => {
+    const r = getRecentFilter(months);
+    ui.filterStart = r.start;
+    ui.filterEnd = r.end;
+    startEl.value = r.start;
+    endEl.value = r.end;
+    renderAll();
+  };
+  document.getElementById("btn-recent-12").addEventListener("click", () => applyRecent(12));
+  document.getElementById("btn-recent-3").addEventListener("click", () => applyRecent(3));
+  document.getElementById("btn-recent-1").addEventListener("click", () => applyRecent(1));
+}
+
+/* ============================================================
+ *  이벤트 바인딩
+ * ============================================================ */
+function bindEvents() {
+  // 화면 폭이 차트 범례 브레이크포인트(760px)를 넘나들면 차트만 다시 그림
+  let lastNarrow = window.matchMedia("(max-width: 760px)").matches;
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const narrow = window.matchMedia("(max-width: 760px)").matches;
+      if (narrow !== lastNarrow) {
+        lastNarrow = narrow;
+        renderChart(ui.filterStart, ui.filterEnd);
+      }
+    }, 150);
+  });
+
+
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    openConfirm({
+      title: "데이터 초기화",
+      message: "모든 데이터를 삭제합니다. 계속하시겠습니까?",
+      onConfirm: () => {
+        state.stores = [];
+        state.monthly = [];
+        ui.selectedStoreId = null;
+        saveToStorage();
+        const def = getDefaultFilter();
+        ui.filterStart = def.start;
+        ui.filterEnd = def.end;
+        document.getElementById("filter-start").value = ui.filterStart;
+        document.getElementById("filter-end").value = ui.filterEnd;
+        renderAll();
+        showToast("초기화되었습니다.");
+      },
+    });
+  });
+
+  document.getElementById("btn-add-store").addEventListener("click", addStore);
+  document.getElementById("btn-add-month").addEventListener("click", addMonth);
+
+  document.getElementById("monthly-store-select").addEventListener("change", (e) => {
+    ui.selectedStoreId = e.target.value;
+    renderMonthlyTable();
+  });
+
+  // 정렬
+  document.querySelectorAll("#store-table thead th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const k = th.dataset.sort;
+      if (ui.sortKey === k) {
+        ui.sortDir = ui.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        ui.sortKey = k;
+        ui.sortDir = "asc";
+      }
+      renderStoreTable(ui.filterStart, ui.filterEnd);
+      renderStoreSelect();
+    });
+  });
+
+  // 삭제 + 타입 토글 위임
+  document.body.addEventListener("click", (e) => {
+    const dStore = e.target.closest("[data-delete-store]");
+    if (dStore) {
+      deleteStore(dStore.dataset.deleteStore);
+      return;
+    }
+    const dMonth = e.target.closest("[data-delete-month]");
+    if (dMonth) {
+      const [storeId, ym] = dMonth.dataset.deleteMonth.split("|");
+      deleteMonth(storeId, ym);
+      return;
+    }
+    const tChip = e.target.closest("[data-toggle-type]");
+    if (tChip) {
+      toggleStoreType(tChip.dataset.toggleType);
+      return;
+    }
+  });
+
+  // 모달
+  document.querySelectorAll("#modal [data-close]").forEach((el) =>
+    el.addEventListener("click", closeModal)
+  );
+  document.getElementById("modal-confirm").addEventListener("click", () => {
+    if (modalConfirmHandler) modalConfirmHandler();
+    closeModal();
+  });
+
+  // 바리스 임포트
+  document.getElementById("btn-baris").addEventListener("click", openBarisModal);
+  document.querySelectorAll("#modal-baris [data-close-baris]").forEach((el) =>
+    el.addEventListener("click", closeBarisModal)
+  );
+  document.getElementById("btn-baris-submit").addEventListener("click", handleBarisSubmit);
+  document.getElementById("baris-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    handleBarisSubmit();
+  });
+
+  // 편집
+  attachEditableHandlers();
+}
+
+/* ============================================================
+ *  유틸: HTML escape
+ * ============================================================ */
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[c]));
+}
+
+/* ============================================================
+ *  부트
+ * ============================================================ */
+function init() {
+  const loaded = loadFromStorage();
+  if (!loaded) {
+    // 최초 방문: 샘플 데이터 시드. 초기화 후에는 빈 상태로 유지됩니다.
+    seedSampleData();
+  }
+  if (state.stores.length > 0) ui.selectedStoreId = state.stores[0].id;
+
+  initFilters();
+  bindEvents();
+  renderAll();
+}
+
+document.addEventListener("DOMContentLoaded", init);

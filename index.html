@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>라운지엑스24h P&L 대시보드</title>
+  <script>
+    // 개발 중 캐시 무효화: 매 로드마다 CSS를 새로 받습니다.
+    document.write('<link rel="stylesheet" href="style.css?t=' + Date.now() + '">');
+  </script>
+  <noscript><link rel="stylesheet" href="style.css" /></noscript>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">라운지엑스24h P&amp;L 대시보드</h1>
+    <div class="topbar-actions">
+      <button id="btn-baris" class="btn btn-primary">업데이트</button>
+      <button id="btn-reset" class="btn btn-danger">데이터 초기화</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 기간 필터 -->
+    <section class="card filter-card">
+      <div class="filter-row">
+        <label>
+          <span>시작</span>
+          <input type="month" id="filter-start" />
+        </label>
+        <label>
+          <span>종료</span>
+          <input type="month" id="filter-end" />
+        </label>
+        <button id="btn-all-period" class="btn btn-ghost">전체 기간</button>
+        <button id="btn-recent-12" class="btn btn-ghost">최근 12개월</button>
+        <button id="btn-recent-3" class="btn btn-ghost">최근 3개월</button>
+        <button id="btn-recent-1" class="btn btn-ghost">최근 1개월</button>
+      </div>
+    </section>
+
+    <!-- KPI -->
+    <section class="kpi-grid">
+      <div class="card kpi">
+        <div class="kpi-label">총 투자자 수익 (평균 수익률)</div>
+        <div class="kpi-value" id="kpi-roi">0.0%</div>
+        <div class="kpi-sub" id="kpi-roi-sub">전체 기간 기준</div>
+      </div>
+      <div class="card kpi accent">
+        <div class="kpi-label">총 회사 수익</div>
+        <div class="kpi-value" id="kpi-company">₩0</div>
+        <div class="kpi-sub" id="kpi-company-sub">전체 기간 월 평균 운영수익 합계</div>
+      </div>
+      <div class="card kpi">
+        <div class="kpi-label">총 매장수</div>
+        <div class="kpi-value" id="kpi-stores">0</div>
+        <div class="kpi-sub" id="kpi-stores-sub">개 매장</div>
+      </div>
+      <div class="card kpi">
+        <div class="kpi-label">총 매출</div>
+        <div class="kpi-value" id="kpi-revenue">₩0</div>
+        <div class="kpi-sub" id="kpi-revenue-sub">선택 기간 합계</div>
+      </div>
+    </section>
+
+    <!-- 매장별 매출 비중 차트 -->
+    <section class="card chart-card">
+      <div class="card-head">
+        <h2>매장별 매출 비중</h2>
+        <div class="muted" id="chart-period"></div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chart-revenue"></canvas>
+      </div>
+    </section>
+
+    <!-- 지점 상세 테이블 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>지점 상세</h2>
+        <button id="btn-add-store" class="btn btn-primary">+ 지점 추가</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="store-table">
+          <thead>
+            <tr>
+              <th data-sort="name">지점명</th>
+              <th data-sort="openDate">오픈일</th>
+              <th data-sort="opDays">운영일자</th>
+              <th data-sort="totalInvestment" class="center">총 투자금액 (VAT 별도)</th>
+              <th data-sort="totalPayout" class="center">총 회수금액</th>
+              <th data-sort="recoveryRate" class="center">회수율</th>
+              <th data-sort="avgRevenue" class="center">평균 매출 (월)</th>
+              <th data-sort="monthlyRent" class="center">임대료 (월)</th>
+              <th data-sort="monthlyLabor" class="center">인건비 (월)</th>
+              <th data-sort="materialCost" class="center">식자재비 (월)</th>
+              <th data-sort="minPayout" class="center">최소 회수금액 (월)</th>
+              <th data-sort="avgPayout" class="center">평균 회수금액 (월)</th>
+              <th data-sort="roi">수익률</th>
+              <th data-sort="companyPnl">회사 P&amp;L</th>
+              <th class="col-action"></th>
+            </tr>
+          </thead>
+          <tbody id="store-tbody"></tbody>
+          <tfoot id="store-tfoot"></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <!-- 월별 실적 입력 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>월별 실적 입력</h2>
+        <div class="head-controls">
+          <label class="select-label">
+            <span>지점 선택</span>
+            <select id="monthly-store-select"></select>
+          </label>
+          <button id="btn-add-month" class="btn btn-primary">+ 월 추가</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="monthly-table">
+          <thead>
+            <tr>
+              <th>연월</th>
+              <th>매출</th>
+              <th>투자자 회수금</th>
+              <th>운영수익 (본사)</th>
+              <th class="col-action"></th>
+            </tr>
+          </thead>
+          <tbody id="monthly-tbody"></tbody>
+          <tfoot id="monthly-tfoot"></tfoot>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- 바리스 임포트 모달 -->
+  <div class="modal" id="modal-baris" hidden>
+    <div class="modal-backdrop" data-close-baris></div>
+    <div class="modal-content card baris-modal">
+      <h3>바리스에서 매출 가져오기</h3>
+      <p class="muted">소유 지점 중 이름에 <strong>"라운지엑스24h"</strong>가 포함된 지점만 매출을 가져옵니다. 세션 전환만 사용하며 매장 운영(키오스크/로봇/주문/메뉴/가격)에는 일절 영향을 주지 않습니다. 투자금·오픈수익 등 직접 입력한 값은 보존됩니다. 비밀번호는 메모리에만 보관됩니다.</p>
+      <form id="baris-form" class="baris-form" autocomplete="off">
+        <label>
+          <span>관리자 ID</span>
+          <input name="account" type="text" autocomplete="off" required />
+        </label>
+        <label>
+          <span>비밀번호</span>
+          <input name="password" type="password" autocomplete="new-password" required />
+        </label>
+      </form>
+      <div class="baris-status" id="baris-status"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" data-close-baris>취소</button>
+        <button class="btn btn-primary" id="btn-baris-submit" type="submit" form="baris-form">가져오기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 모달 -->
+  <div class="modal" id="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-content card">
+      <h3 id="modal-title">확인</h3>
+      <p id="modal-message"></p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>취소</button>
+        <button class="btn btn-danger" id="modal-confirm">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script>document.write('<scr' + 'ipt src="script.js?t=' + Date.now() + '"></scr' + 'ipt>');</script>
+</body>
+</html>

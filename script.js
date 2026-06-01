@@ -932,10 +932,18 @@ async function barisLogin(account, password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ account, password }),
   });
-  if (!r.ok) throw new Error(`로그인 실패 (HTTP ${r.status})`);
-  const j = await r.json();
+  // 응답 본문을 먼저 파싱(서버가 실패 사유를 payload.message로 내려줌)
+  let j = null;
+  try { j = await r.json(); } catch { /* 본문 없음 */ }
   const payload = j?.payload;
-  if (!payload?.accessToken) throw new Error("로그인 응답에 토큰이 없습니다.");
+
+  if (!payload?.accessToken) {
+    // 서버가 준 실제 메시지를 그대로 노출 (예: "관리자 정보 없음", "비밀번호 불일치")
+    const serverMsg = payload?.message || j?.message;
+    if (serverMsg) throw new Error(`로그인 실패: ${serverMsg}`);
+    if (!r.ok) throw new Error(`로그인 실패 (HTTP ${r.status})`);
+    throw new Error("로그인 응답에 토큰이 없습니다.");
+  }
   if (!payload?.branchID) throw new Error("로그인 응답에 지점 정보가 없습니다.");
   return payload; // { accessToken, branchID, name, managerID, ... }
 }
@@ -1379,7 +1387,7 @@ function bindEvents() {
   document.querySelectorAll("#modal-baris [data-close-baris]").forEach((el) =>
     el.addEventListener("click", closeBarisModal)
   );
-  document.getElementById("btn-baris-submit").addEventListener("click", handleBarisSubmit);
+  // 제출은 폼 submit 이벤트 하나로만 처리(버튼 click 중복 바인딩 제거 → 로그인 1회만 호출)
   document.getElementById("baris-form").addEventListener("submit", (e) => {
     e.preventDefault();
     handleBarisSubmit();

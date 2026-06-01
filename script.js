@@ -204,53 +204,55 @@ async function cloudSave({ silent = false } = {}) {
   }
 }
 
-// 사용자가 직접 입력하는 지점 필드(바리스로 덮어쓰면 안 되는 값)
+// 사용자가 직접 입력하는 지점 필드(바리스/클라우드로 함부로 덮어쓰면 안 되는 값)
 const MANUAL_STORE_FIELDS = [
   "totalInvestment", "monthlyRent", "monthlyLabor",
-  "openingProfit", "openDate", "operatingProfitRate", "type",
+  "openingProfit", "openDate", "operatingProfitRate", "type", "name",
 ];
 
-// 현재 state의 수기 입력 필드를 지점 id별로 백업
-function snapshotManualFields() {
-  const map = new Map();
-  for (const s of state.stores) {
-    const o = {};
-    for (const f of MANUAL_STORE_FIELDS) o[f] = s[f];
-    map.set(s.id, o);
-  }
-  return map;
-}
-
-// 백업한 수기 입력값을 복원(로컬에 의미 있는 값이 있으면 그것을 우선 유지)
-function restoreManualFields(map) {
-  const isMeaningful = (v) =>
-    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
-  for (const s of state.stores) {
-    const o = map.get(s.id);
-    if (!o) continue;
-    for (const f of MANUAL_STORE_FIELDS) {
-      if (isMeaningful(o[f])) s[f] = o[f];
-    }
-  }
-}
-
-// 클라우드에서 공유 데이터를 불러와 state에 반영. 토큰 없거나 실패 시 false.
-async function cloudLoad() {
+// 클라우드 데이터를 받아오기만 함(state 변경 없음). 없거나 실패 시 null.
+async function cloudFetch() {
   const token = getBarisToken();
-  if (!token) return false;
+  if (!token) return null;
   try {
     const r = await fetch(`${CLOUD_BASE}/__data`, { headers: { Authorization: "Bearer " + token } });
-    if (r.status === 401) { localStorage.removeItem(BARIS_TOKEN_STORAGE); return false; }
-    if (!r.ok) return false;
+    if (r.status === 401) { localStorage.removeItem(BARIS_TOKEN_STORAGE); return null; }
+    if (!r.ok) return null;
     const data = await r.json();
-    if (!Array.isArray(data.stores) || !Array.isArray(data.monthly)) return false;
-    state.stores = data.stores;
-    state.monthly = data.monthly;
-    saveToStorage();
-    return true;
+    if (!Array.isArray(data.stores) || !Array.isArray(data.monthly)) return null;
+    return data;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// 클라우드 데이터를 현재 state에 "병합"한다(로컬 우선, 클라우드는 보충).
+//  - 로컬에 없는 지점/월은 클라우드에서 추가
+//  - 로컬에 있는 지점의 수기 입력값은 보존, 비어 있는 값만 클라우드로 채움
+function mergeCloudData(cloud) {
+  if (!cloud || !Array.isArray(cloud.stores) || !Array.isArray(cloud.monthly)) return false;
+  const isMeaningful = (v) =>
+    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
+
+  const byId = new Map(state.stores.map((s) => [s.id, s]));
+  for (const cs of cloud.stores) {
+    const ls = byId.get(cs.id);
+    if (!ls) {
+      state.stores.push({ ...cs }); // 로컬에 없는 지점은 클라우드에서 추가
+      byId.set(cs.id, cs);
+    } else {
+      // 로컬 지점: 수기 입력값이 비어 있을 때만 클라우드 값으로 보충(로컬 우선)
+      for (const f of MANUAL_STORE_FIELDS) {
+        if (!isMeaningful(ls[f]) && isMeaningful(cs[f])) ls[f] = cs[f];
+      }
+    }
+  }
+  // monthly: 로컬에 없는 (지점,월)만 클라우드에서 추가(로컬 매출/회수금 우선)
+  const localKeys = new Set(state.monthly.map((m) => m.storeId + "|" + m.yearMonth));
+  for (const cm of cloud.monthly) {
+    if (!localKeys.has(cm.storeId + "|" + cm.yearMonth)) state.monthly.push({ ...cm });
+  }
+  return true;
 }
 
 function resetStorage() {
@@ -1221,13 +1223,11 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
-    // 로그인 직후, 클라우드에 저장된 공유 데이터를 먼저 불러와(다른 기기 입력값 반영),
+    // 클라우드의 공유 데이터를 현재 데이터에 "병합"(로컬 수기 입력 보존, 다른 기기 지점 보충),
     // 그 위에 바리스 매출을 병합한다.
-    // 단, 이 기기에서 방금 입력한 수기 값(투자금·임대료·인건비·오픈일 등)은 백업→복원해 보존.
     setBarisStatus("클라우드 동기화 중...", "");
-    const manualBackup = snapshotManualFields();
-    await cloudLoad();
-    restoreManualFields(manualBackup);
+    const cloud = await cloudFetch();
+    if (cloud) mergeCloudData(cloud);
 
     for (const b of result.branches) mergeBarisResult(b);
     const def = getDefaultFilter();
@@ -1489,12 +1489,9 @@ function init() {
   bindEvents();
   renderAll();
 
-  // 클라우드 공유 데이터가 있으면 자동으로 불러와 모든 기기에서 공통 표시
-  // (이 기기에서 입력한 수기 값은 보존)
-  const manualBackup = snapshotManualFields();
-  cloudLoad().then((loaded) => {
-    if (!loaded) return;
-    restoreManualFields(manualBackup);
+  // 클라우드 공유 데이터가 있으면 병합(로컬 수기 입력 보존)해 모든 기기에서 공통 표시
+  cloudFetch().then((cloud) => {
+    if (!cloud || !mergeCloudData(cloud)) return;
     saveToStorage();
     if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
       ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;

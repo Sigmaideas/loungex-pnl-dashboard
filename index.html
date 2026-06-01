@@ -148,18 +148,26 @@
       <p class="muted">소유 지점 중 이름에 <strong>"라운지엑스24h"</strong>가 포함된 지점만 매출을 가져옵니다. 세션 전환만 사용하며 매장 운영(키오스크/로봇/주문/메뉴/가격)에는 일절 영향을 주지 않습니다. 투자금·오픈수익 등 직접 입력한 값은 보존됩니다. 비밀번호는 메모리에만 보관됩니다.</p>
       <form id="baris-form" class="baris-form" autocomplete="off">
         <label>
-          <span>관리자 이메일</span>
-          <input name="account" type="email" autocomplete="off" placeholder="바리스 로그인 이메일" required />
+          <span>관리자 ID</span>
+          <input name="account" type="text" autocomplete="off" placeholder="바리스 로그인 ID" />
         </label>
         <label>
           <span>비밀번호</span>
-          <input name="password" type="password" autocomplete="new-password" required />
+          <input name="password" type="password" autocomplete="new-password" />
         </label>
       </form>
+
+      <details class="baris-token">
+        <summary>로그인이 안 되나요? 액세스 토큰으로 가져오기</summary>
+        <p class="muted">바리스(<strong>barison.xyzcorp.io</strong>)에 로그인한 상태에서 개발자도구 콘솔(F12)에 아래를 입력해 토큰을 복사한 뒤 붙여넣으세요.<br><code>copy(localStorage.getItem('accessToken'))</code></p>
+        <textarea id="baris-token-input" class="baris-token-area" placeholder="여기에 액세스 토큰 붙여넣기" rows="3"></textarea>
+        <button class="btn btn-primary baris-token-btn" type="button" id="btn-baris-token">토큰으로 가져오기</button>
+      </details>
+
       <div class="baris-status" id="baris-status"></div>
       <div class="modal-actions">
         <button class="btn btn-ghost" type="button" data-close-baris>취소</button>
-        <button class="btn btn-primary" id="btn-baris-submit" type="submit" form="baris-form">가져오기</button>
+        <button class="btn btn-primary" id="btn-baris-submit" type="submit" form="baris-form">ID로 가져오기</button>
       </div>
     </div>
   </div>

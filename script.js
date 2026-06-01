@@ -1025,10 +1025,17 @@ async function barisChangeBranch(branchID, token) {
   return newToken;
 }
 
-async function importFromBaris({ account, password, startYM, endYM, onProgress }) {
-  onProgress?.("로그인 중...");
-  const auth = await barisLogin(account, password);
-  const token = auth.accessToken;
+async function importFromBaris({ account, password, token: presetToken, startYM, endYM, onProgress }) {
+  let token;
+  if (presetToken) {
+    // 토큰 직접 입력(이메일/비번 로그인이 불가한 계정용)
+    token = presetToken.trim().replace(/^Bearer\s+/i, "");
+    onProgress?.("토큰으로 접속 중...");
+  } else {
+    onProgress?.("로그인 중...");
+    const auth = await barisLogin(account, password);
+    token = auth.accessToken;
+  }
 
   onProgress?.("지점 목록 조회 중...");
   const owned = await barisFetchOwnBranches(token);
@@ -1170,28 +1177,16 @@ function setBarisStatus(text, kind = "") {
   el.className = "baris-status" + (kind ? ` ${kind}` : "");
 }
 
-async function handleBarisSubmit() {
-  const form = document.getElementById("baris-form");
-  const submitBtn = document.getElementById("btn-baris-submit");
-  const account = form.elements.account.value.trim();
-  const password = form.elements.password.value;
+// 공통 임포트 실행: importArgs(account/password 또는 token)를 받아 실행하고 화면 반영
+async function runBarisImport(importArgs, disableBtns) {
   const startYM = BARIS_DEFAULT_START_YM;
   const endYM = getCurrentYM();
-
-  if (!account || !password) {
-    setBarisStatus("관리자 이메일과 비밀번호를 입력하세요.", "error");
-    return;
-  }
-
-  submitBtn.disabled = true;
+  disableBtns(true);
   try {
     const result = await importFromBaris({
-      account, password, startYM, endYM,
+      ...importArgs, startYM, endYM,
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
-    // 비밀번호와 ID 즉시 제거 (다음 지점 로그인을 위해)
-    form.elements.password.value = "";
-    form.elements.account.value = "";
 
     for (const b of result.branches) mergeBarisResult(b);
     const def = getDefaultFilter();
@@ -1213,8 +1208,40 @@ async function handleBarisSubmit() {
   } catch (err) {
     setBarisStatus(err.message || String(err), "error");
   } finally {
-    submitBtn.disabled = false;
+    disableBtns(false);
   }
+}
+
+function setBarisBtnsDisabled(v) {
+  document.getElementById("btn-baris-submit").disabled = v;
+  const tb = document.getElementById("btn-baris-token");
+  if (tb) tb.disabled = v;
+}
+
+async function handleBarisSubmit() {
+  const form = document.getElementById("baris-form");
+  const account = form.elements.account.value.trim();
+  const password = form.elements.password.value;
+
+  if (!account || !password) {
+    setBarisStatus("관리자 ID와 비밀번호를 입력하세요.", "error");
+    return;
+  }
+  await runBarisImport({ account, password }, setBarisBtnsDisabled);
+  // 비밀번호·ID 즉시 제거
+  form.elements.password.value = "";
+  form.elements.account.value = "";
+}
+
+async function handleBarisTokenSubmit() {
+  const input = document.getElementById("baris-token-input");
+  const token = (input.value || "").trim();
+  if (!token) {
+    setBarisStatus("액세스 토큰을 붙여넣으세요.", "error");
+    return;
+  }
+  await runBarisImport({ token }, setBarisBtnsDisabled);
+  input.value = ""; // 토큰 즉시 제거
 }
 
 /* ============================================================
@@ -1392,6 +1419,7 @@ function bindEvents() {
     e.preventDefault();
     handleBarisSubmit();
   });
+  document.getElementById("btn-baris-token").addEventListener("click", handleBarisTokenSubmit);
 
   // 편집
   attachEditableHandlers();

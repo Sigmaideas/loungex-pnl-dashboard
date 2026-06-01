@@ -204,6 +204,36 @@ async function cloudSave({ silent = false } = {}) {
   }
 }
 
+// 사용자가 직접 입력하는 지점 필드(바리스로 덮어쓰면 안 되는 값)
+const MANUAL_STORE_FIELDS = [
+  "totalInvestment", "monthlyRent", "monthlyLabor",
+  "openingProfit", "openDate", "operatingProfitRate", "type",
+];
+
+// 현재 state의 수기 입력 필드를 지점 id별로 백업
+function snapshotManualFields() {
+  const map = new Map();
+  for (const s of state.stores) {
+    const o = {};
+    for (const f of MANUAL_STORE_FIELDS) o[f] = s[f];
+    map.set(s.id, o);
+  }
+  return map;
+}
+
+// 백업한 수기 입력값을 복원(로컬에 의미 있는 값이 있으면 그것을 우선 유지)
+function restoreManualFields(map) {
+  const isMeaningful = (v) =>
+    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
+  for (const s of state.stores) {
+    const o = map.get(s.id);
+    if (!o) continue;
+    for (const f of MANUAL_STORE_FIELDS) {
+      if (isMeaningful(o[f])) s[f] = o[f];
+    }
+  }
+}
+
 // 클라우드에서 공유 데이터를 불러와 state에 반영. 토큰 없거나 실패 시 false.
 async function cloudLoad() {
   const token = getBarisToken();
@@ -1191,10 +1221,13 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
-    // 로그인 직후, 클라우드에 저장된 공유 데이터를 먼저 불러와(수기 입력값 보존),
-    // 그 위에 바리스 매출을 병합한다. 이렇게 해야 다른 기기에서 입력한 투자금 등이 유지됨.
+    // 로그인 직후, 클라우드에 저장된 공유 데이터를 먼저 불러와(다른 기기 입력값 반영),
+    // 그 위에 바리스 매출을 병합한다.
+    // 단, 이 기기에서 방금 입력한 수기 값(투자금·임대료·인건비·오픈일 등)은 백업→복원해 보존.
     setBarisStatus("클라우드 동기화 중...", "");
+    const manualBackup = snapshotManualFields();
     await cloudLoad();
+    restoreManualFields(manualBackup);
 
     for (const b of result.branches) mergeBarisResult(b);
     const def = getDefaultFilter();
@@ -1457,8 +1490,12 @@ function init() {
   renderAll();
 
   // 클라우드 공유 데이터가 있으면 자동으로 불러와 모든 기기에서 공통 표시
+  // (이 기기에서 입력한 수기 값은 보존)
+  const manualBackup = snapshotManualFields();
   cloudLoad().then((loaded) => {
     if (!loaded) return;
+    restoreManualFields(manualBackup);
+    saveToStorage();
     if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
       ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;
     }

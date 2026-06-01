@@ -11,7 +11,7 @@ const DEFAULT_MONTHLY_LABOR = 3_000_000;
 //  - 그 외(github.io 등): 서버가 외부 출처를 Origin으로 차단하므로 프록시(Cloudflare Worker) 경유.
 //    프록시는 서버 측에서 Origin/Referer를 barison.xyzcorp.io로 바꿔 전달한다.
 const BARIS_API_DIRECT = "https://api-baris-v3-backoffice.xyzcorp.io";
-const BARIS_API_PROXY = "%%BARIS_PROXY_URL%%"; // 배포 후 Worker URL로 치환
+const BARIS_API_PROXY = "https://loungex-baris-proxy.sigmaidea.workers.dev"; // Cloudflare Worker 프록시
 const BARIS_API_BASE = (function () {
   const isLocal = ["localhost", "127.0.0.1"].includes(location.hostname);
   if (isLocal) return BARIS_API_DIRECT;

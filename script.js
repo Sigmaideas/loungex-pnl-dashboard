@@ -19,9 +19,11 @@ const BARIS_API_BASE = (function () {
 })();
 
 // 공유 클라우드 저장소(Cloudflare Worker + KV). 저장 시 모든 기기에서 공통으로 보임.
+// 인증은 별도 공유암호 없이, "업데이트"로 받은 바리스 로그인 토큰을 사용한다.
 const CLOUD_BASE = "https://loungex-baris-proxy.sigmaidea.workers.dev";
-const CLOUD_KEY_STORAGE = "loungex_cloud_key";
-const getCloudKey = () => (localStorage.getItem(CLOUD_KEY_STORAGE) || "").trim();
+const BARIS_TOKEN_STORAGE = "loungex_baris_token";
+const getBarisToken = () => localStorage.getItem(BARIS_TOKEN_STORAGE) || "";
+const setBarisToken = (t) => { if (t) localStorage.setItem(BARIS_TOKEN_STORAGE, t); };
 
 const STORE_TYPE_DIRECT = "직영모델";
 const STORE_TYPE_OWNER = "점주투자모델";
@@ -175,41 +177,40 @@ function loadFromStorage() {
 /* ============================================================
  *  공유 클라우드 저장(모든 기기 공통)
  * ============================================================ */
-// 현재 데이터를 클라우드에 저장. 공유 암호가 없으면 1회 입력받음.
-async function cloudSave() {
-  let key = getCloudKey();
-  if (!key) {
-    const entered = prompt("공유 암호를 입력하세요 (모든 기기에서 동일하게 사용):");
-    if (entered == null) return;
-    key = entered.trim();
-    if (!key) return;
-    localStorage.setItem(CLOUD_KEY_STORAGE, key);
+// 현재 데이터를 클라우드에 저장. 바리스 로그인 토큰으로 인증.
+async function cloudSave({ silent = false } = {}) {
+  const token = getBarisToken();
+  if (!token) {
+    if (!silent) showToast("먼저 '업데이트'로 바리스에 로그인하세요.");
+    return false;
   }
   try {
     const r = await fetch(`${CLOUD_BASE}/__data`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json", "X-Save-Key": key },
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
       body: JSON.stringify({ stores: state.stores, monthly: state.monthly }),
     });
     if (r.status === 401) {
-      localStorage.removeItem(CLOUD_KEY_STORAGE);
-      showToast("공유 암호가 올바르지 않습니다. 저장을 다시 눌러 입력하세요.");
-      return;
+      localStorage.removeItem(BARIS_TOKEN_STORAGE);
+      if (!silent) showToast("로그인이 만료됐습니다. '업데이트'로 다시 로그인 후 저장하세요.");
+      return false;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    showToast("클라우드에 저장했습니다. 이제 모든 기기에서 공통으로 보입니다.");
+    if (!silent) showToast("클라우드에 저장했습니다. 이제 모든 기기에서 공통으로 보입니다.");
+    return true;
   } catch (e) {
-    showToast("저장 실패: " + (e.message || e));
+    if (!silent) showToast("저장 실패: " + (e.message || e));
+    return false;
   }
 }
 
-// 클라우드에서 공유 데이터를 불러와 state에 반영. 암호 없거나 실패 시 false.
+// 클라우드에서 공유 데이터를 불러와 state에 반영. 토큰 없거나 실패 시 false.
 async function cloudLoad() {
-  const key = getCloudKey();
-  if (!key) return false;
+  const token = getBarisToken();
+  if (!token) return false;
   try {
-    const r = await fetch(`${CLOUD_BASE}/__data`, { headers: { "X-Save-Key": key } });
-    if (r.status === 401) { localStorage.removeItem(CLOUD_KEY_STORAGE); return false; }
+    const r = await fetch(`${CLOUD_BASE}/__data`, { headers: { Authorization: "Bearer " + token } });
+    if (r.status === 401) { localStorage.removeItem(BARIS_TOKEN_STORAGE); return false; }
     if (!r.ok) return false;
     const data = await r.json();
     if (!Array.isArray(data.stores) || !Array.isArray(data.monthly)) return false;
@@ -405,7 +406,7 @@ function renderChart(startYM, endYM) {
   const wrap = document.querySelector(".chart-card .chart-wrap");
   if (!wrap) return;
 
-  // 평균 매출(월) 내림차순으로 정렬
+  // 매출 비중(슬라이스 값) 높은 것부터 낮은 것 순으로 정렬
   const items = state.stores
     .map((store) => {
       const m = getStoreMetrics(store, startYM, endYM);
@@ -416,7 +417,7 @@ function renderChart(startYM, endYM) {
       };
     })
     .filter((x) => x.revenue > 0)
-    .sort((a, b) => b.avgMonthlyRevenue - a.avgMonthlyRevenue);
+    .sort((a, b) => b.revenue - a.revenue);
 
   const labels = items.map((x) => x.name);
   const values = items.map((x) => x.revenue);
@@ -1037,6 +1038,7 @@ async function importFromBaris({ account, password, startYM, endYM, onProgress }
   onProgress?.("로그인 중...");
   const auth = await barisLogin(account, password);
   const token = auth.accessToken;
+  setBarisToken(token); // 클라우드 저장/불러오기 인증에 재사용
 
   onProgress?.("지점 목록 조회 중...");
   const owned = await barisFetchOwnBranches(token);
@@ -1189,6 +1191,11 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
+    // 로그인 직후, 클라우드에 저장된 공유 데이터를 먼저 불러와(수기 입력값 보존),
+    // 그 위에 바리스 매출을 병합한다. 이렇게 해야 다른 기기에서 입력한 투자금 등이 유지됨.
+    setBarisStatus("클라우드 동기화 중...", "");
+    await cloudLoad();
+
     for (const b of result.branches) mergeBarisResult(b);
     const def = getDefaultFilter();
     ui.filterStart = def.start;
@@ -1197,6 +1204,9 @@ async function runBarisImport(importArgs, disableBtns) {
     document.getElementById("filter-end").value = ui.filterEnd;
     saveToStorage();
     renderAll();
+
+    // 병합 결과를 클라우드에 자동 저장 → 모든 기기 공통
+    await cloudSave({ silent: true });
 
     const totalMonthly = result.branches.reduce((s, b) => s + b.monthCount, 0);
     const names = result.branches.map((b) => b.branchName).join(", ");

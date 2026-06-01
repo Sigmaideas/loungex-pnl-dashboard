@@ -26,8 +26,19 @@ const ALLOW_ORIGINS = [
   "http://127.0.0.1:8000",
 ];
 
-// 공유 데이터 저장 키(KV 안에서의 키 이름)
+// 공유 데이터 저장 키(KV 안에서의 키 접두사)
 const DATA_KEY = "dashboard";
+
+// JWT(액세스 토큰)에서 managerID 추출 — 계정별 데이터 분리용(인증이 아니라 네임스페이스 용도).
+function managerIdFromToken(token) {
+  try {
+    let p = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (p.length % 4) p += "=";
+    return JSON.parse(atob(p)).managerID || "default";
+  } catch (_) {
+    return "default";
+  }
+}
 
 export default {
   async fetch(request, env) {
@@ -48,22 +59,41 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
-    // ───────── 공유 데이터 저장/조회 (KV, 공유 암호로 보호) ─────────
+    // ───────── 공유 데이터 저장/조회 (KV, 바리스 로그인으로 인증) ─────────
+    // 별도 공유암호 없이, 요청에 담긴 바리스 액세스 토큰을 실제 바리스 API로 검증한다.
+    // 데이터는 바리스 계정(managerID)별 버킷으로 분리 저장한다.
     if (url.pathname === "/__data") {
       const jsonCors = { ...cors, "Content-Type": "application/json" };
-      const key = request.headers.get("X-Save-Key") || "";
-      // SAVE_KEY 비밀값과 일치해야 읽기/쓰기 허용
-      if (!env.SAVE_KEY || key !== env.SAVE_KEY) {
-        return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: jsonCors });
+      const token = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+      if (!token) {
+        return new Response(JSON.stringify({ error: "no_token" }), { status: 401, headers: jsonCors });
       }
+      // 바리스 토큰 유효성 검증(서버 측에서 barison 출처로 호출)
+      let valid = false;
+      try {
+        const v = await fetch(TARGET + "/xmanager/branches/own", {
+          headers: {
+            Authorization: "Bearer " + token,
+            Accept: "application/json, text/plain, */*",
+            Origin: "https://barison.xyzcorp.io",
+            Referer: "https://barison.xyzcorp.io/",
+          },
+        });
+        valid = v.ok;
+      } catch (_) { valid = false; }
+      if (!valid) {
+        return new Response(JSON.stringify({ error: "invalid_token" }), { status: 401, headers: jsonCors });
+      }
+
+      const kvKey = DATA_KEY + ":" + managerIdFromToken(token);
       if (request.method === "GET") {
-        const stored = await env.DATA.get(DATA_KEY);
+        const stored = await env.DATA.get(kvKey);
         return new Response(stored || JSON.stringify({ stores: [], monthly: [] }), { status: 200, headers: jsonCors });
       }
       if (request.method === "PUT" || request.method === "POST") {
         const text = await request.text();
         try { JSON.parse(text); } catch { return new Response(JSON.stringify({ error: "invalid_json" }), { status: 400, headers: jsonCors }); }
-        await env.DATA.put(DATA_KEY, text);
+        await env.DATA.put(kvKey, text);
         return new Response(JSON.stringify({ ok: true, savedAt: new Date().toISOString() }), { status: 200, headers: jsonCors });
       }
       return new Response(JSON.stringify({ error: "method_not_allowed" }), { status: 405, headers: jsonCors });

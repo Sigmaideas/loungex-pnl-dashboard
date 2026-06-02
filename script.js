@@ -712,30 +712,59 @@ function renderStoreSelect() {
     .join("");
 }
 
+// 해당 연월의 달력상 일수 (예: 2026-04 → 30)
+function daysInYearMonth(ym) {
+  const [y, mo] = ym.split("-").map(Number);
+  return new Date(y, mo, 0).getDate();
+}
+
+// 기본 실제 운영일수: 오픈월이면 오픈일~말일, 오픈 전이면 0, 이후면 그 달 전체
+function defaultOperatingDays(store, ym) {
+  const dim = daysInYearMonth(ym);
+  if (!store.openDate) return dim;
+  const openYM = store.openDate.slice(0, 7);
+  if (ym < openYM) return 0;
+  if (ym > openYM) return dim;
+  const openDay = Number(store.openDate.slice(8, 10)) || 1;
+  return Math.max(0, dim - openDay + 1);
+}
+
+// 실제 운영일수: 사용자가 입력한 값(operatingDays)이 있으면 우선, 없으면 기본 계산
+function getOperatingDays(store, m) {
+  if (m.operatingDays != null && m.operatingDays !== "") return Number(m.operatingDays);
+  return defaultOperatingDays(store, m.yearMonth);
+}
+
 function renderMonthlyTable() {
   const tbody = document.getElementById("monthly-tbody");
   const tfoot = document.getElementById("monthly-tfoot");
 
   const store = state.stores.find((s) => s.id === ui.selectedStoreId);
   if (!store) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">먼저 지점을 추가하세요.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">먼저 지점을 추가하세요.</td></tr>';
     tfoot.innerHTML = "";
     return;
   }
 
   const rows = getMonthlyForStore(store.id);
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">해당 지점의 월별 실적이 없습니다. "+ 월 추가" 버튼으로 시작하세요.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">해당 지점의 월별 실적이 없습니다. "+ 월 추가" 버튼으로 시작하세요.</td></tr>';
     tfoot.innerHTML = "";
     return;
   }
 
+  let totalOpDays = 0;
   tbody.innerHTML = rows.map((m) => {
     const opProfit = (m.revenue || 0) * 0.9 * 0.1;  // 운영수익 = 매출 × 90% × 10% (= 9%)
     const payout = (m.revenue || 0) * 0.9 * 0.2;    // 투자자 회수금 = 매출 × 90% × 20% (= 18%)
+    const monthDays = daysInYearMonth(m.yearMonth);
+    const opDays = getOperatingDays(store, m);
+    totalOpDays += opDays;
     return `
       <tr data-month-key="${store.id}|${m.yearMonth}">
         <td><span class="cell-editable" data-edit="monthly" data-field="yearMonth" data-store-id="${store.id}" data-key="${m.yearMonth}" data-input-type="month">${m.yearMonth}</span></td>
+        <td class="num cell-readonly">${monthDays}일</td>
+        <td class="num"><span class="cell-editable" data-edit="monthly" data-field="operatingDays" data-store-id="${store.id}" data-key="${m.yearMonth}" data-input-type="number">${opDays}</span>일</td>
         <td class="num"><span class="cell-editable" data-edit="monthly" data-field="revenue" data-store-id="${store.id}" data-key="${m.yearMonth}" data-input-type="number">${formatCurrency(m.revenue)}</span></td>
         <td class="num cell-readonly">${formatCurrency(payout)}</td>
         <td class="num cell-readonly accent" style="color: var(--accent);">${formatCurrency(opProfit)}</td>
@@ -753,6 +782,8 @@ function renderMonthlyTable() {
   tfoot.innerHTML = `
     <tr>
       <td>합계</td>
+      <td></td>
+      <td class="num">${totalOpDays}일</td>
       <td class="num">${formatCurrency(totalRev)}</td>
       <td class="num">${formatCurrency(totalPayout)}</td>
       <td class="num" style="color: var(--accent);">${formatCurrency(totalOp)}</td>
@@ -789,6 +820,11 @@ function startEditing(cell) {
     );
     if (!m) return;
     originalValue = m[field];
+    // 실제 운영일을 아직 입력 안 했으면 현재 계산값을 편집 초기값으로 사용
+    if (field === "operatingDays" && (originalValue == null || originalValue === "")) {
+      const store = state.stores.find((s) => s.id === cell.dataset.storeId);
+      if (store) originalValue = getOperatingDays(store, m);
+    }
   }
 
   if (inputType === "number") {

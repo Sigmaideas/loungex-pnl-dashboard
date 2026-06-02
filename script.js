@@ -615,15 +615,12 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
       <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue)}</td>
       <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
-      <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyLabor" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)}</span></td>
-      <td class="num center cell-readonly">${formatCurrency(m.materialCost)}</td>
       <td class="num center cell-readonly">${formatCurrency(m.minMonthlyPayout)}</td>
       <td class="num center cell-readonly ${m.avgMonthlyPayout >= m.minMonthlyPayout && m.minMonthlyPayout > 0 ? "pos" : ""}">${formatCurrency(m.avgMonthlyPayout)}</td>
       <td class="num cell-readonly ${formatRoiDisplay(m.roi, m.minMonthlyPayout).cls}">${formatRoiDisplay(m.roi, m.minMonthlyPayout).text}</td>
       <td>
         <div class="pnl-stack">
           <div class="pnl-line ${m.operatingProfit < 0 ? "neg" : "accent"}">
-            <span class="label">운영수익</span>
             <span class="value">${formatCurrency(m.operatingProfit)}</span>
           </div>
         </div>
@@ -667,14 +664,12 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center">${renderRecoveryBar(sum.investment > 0 ? sum.totalPayout / sum.investment : 0, sum.investment > 0)}</td>
       <td class="num center">${formatCurrency(avgRevenueAll)}</td>
       <td class="num center">${formatCurrency(sum.monthlyRent)}</td>
-      <td class="num center">${formatCurrency(sum.monthlyLabor)}</td>
-      <td class="num center">${formatCurrency(sum.materialCost)}</td>
       <td class="num center">${formatCurrency(sum.minPayout)}</td>
       <td class="num center ${avgPayoutAll >= sum.minPayout / Math.max(rows.length, 1) ? "pos" : ""}">${formatCurrency(avgPayoutAll)}</td>
       <td class="num ${formatRoiDisplay(avgRoi, aggregateMinPayout).cls}">${formatRoiDisplay(avgRoi, aggregateMinPayout).text}</td>
       <td>
         <div class="pnl-stack">
-          <div class="pnl-line ${sum.operatingProfit < 0 ? "neg" : "accent"}"><span class="label">운영수익</span><span class="value">${formatCurrency(sum.operatingProfit)}</span></div>
+          <div class="pnl-line ${sum.operatingProfit < 0 ? "neg" : "accent"}"><span class="value">${formatCurrency(sum.operatingProfit)}</span></div>
         </div>
       </td>
       <td></td>

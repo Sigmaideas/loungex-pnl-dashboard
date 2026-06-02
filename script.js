@@ -152,11 +152,33 @@ const parseNumberInput = (str) => {
 /* ============================================================
  *  저장 / 복원
  * ============================================================ */
-function saveToStorage() {
+function saveLocalOnly() {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({ stores: state.stores, monthly: state.monthly })
   );
+}
+
+// 모든 데이터 변경 시 호출됨 → 로컬 저장 + 클라우드 자동 동기화(디바운스)
+function saveToStorage() {
+  saveLocalOnly();
+  scheduleCloudSync();
+}
+
+// 편집 후 잠시 뒤 클라우드에 자동 저장(로그인 상태일 때만)
+let cloudSyncTimer = null;
+function scheduleCloudSync() {
+  if (!getBarisToken()) return; // 로그인 전이면 동기화 안 함
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => { cloudSave({ silent: true }); }, 1500);
+}
+
+// 대기 중인 자동 저장을 즉시 실행(데이터가 있을 때만). 업데이트 직전 미저장 편집 보존용.
+async function flushCloudSync() {
+  if (!cloudSyncTimer) return;
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = null;
+  if (state.stores.length > 0) await cloudSave({ silent: true });
 }
 
 function loadFromStorage() {
@@ -192,7 +214,8 @@ async function cloudSave({ silent = false } = {}) {
     });
     if (r.status === 401) {
       localStorage.removeItem(BARIS_TOKEN_STORAGE);
-      if (!silent) showToast("로그인이 만료됐습니다. '업데이트'로 다시 로그인 후 저장하세요.");
+      // 자동 저장 중이라도 인증 만료는 사용자에게 알림(동기화 끊김 방지)
+      showToast("동기화가 끊겼습니다. '업데이트'로 다시 로그인해 주세요.");
       return false;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -226,32 +249,16 @@ async function cloudFetch() {
   }
 }
 
-// 클라우드 데이터를 현재 state에 "병합"한다(로컬 우선, 클라우드는 보충).
-//  - 로컬에 없는 지점/월은 클라우드에서 추가
-//  - 로컬에 있는 지점의 수기 입력값은 보존, 비어 있는 값만 클라우드로 채움
-function mergeCloudData(cloud) {
-  if (!cloud || !Array.isArray(cloud.stores) || !Array.isArray(cloud.monthly)) return false;
-  const isMeaningful = (v) =>
-    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
-
-  const byId = new Map(state.stores.map((s) => [s.id, s]));
-  for (const cs of cloud.stores) {
-    const ls = byId.get(cs.id);
-    if (!ls) {
-      state.stores.push({ ...cs }); // 로컬에 없는 지점은 클라우드에서 추가
-      byId.set(cs.id, cs);
-    } else {
-      // 로컬 지점: 수기 입력값이 비어 있을 때만 클라우드 값으로 보충(로컬 우선)
-      for (const f of MANUAL_STORE_FIELDS) {
-        if (!isMeaningful(ls[f]) && isMeaningful(cs[f])) ls[f] = cs[f];
-      }
-    }
-  }
-  // monthly: 로컬에 없는 (지점,월)만 클라우드에서 추가(로컬 매출/회수금 우선)
-  const localKeys = new Set(state.monthly.map((m) => m.storeId + "|" + m.yearMonth));
-  for (const cm of cloud.monthly) {
-    if (!localKeys.has(cm.storeId + "|" + cm.yearMonth)) state.monthly.push({ ...cm });
-  }
+// 클라우드를 "공유 원본"으로 보고 현재 데이터를 클라우드 내용으로 교체한다.
+//  - 다른 기기에서 저장한 변경(기존 값 수정 포함)이 그대로 보임.
+//  - 단, 클라우드가 비어 있으면(지점 0) 로컬을 지우지 않음(빈 클라우드로 인한 유실 방지).
+async function cloudPull() {
+  const cloud = await cloudFetch();
+  if (!cloud) return false;
+  if (cloud.stores.length === 0 && cloud.monthly.length === 0) return false;
+  state.stores = cloud.stores;
+  state.monthly = cloud.monthly;
+  saveLocalOnly(); // 받은 내용을 그대로 되올리지 않도록 동기화 트리거 없이 저장
   return true;
 }
 
@@ -1223,11 +1230,11 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
-    // 클라우드의 공유 데이터를 현재 데이터에 "병합"(로컬 수기 입력 보존, 다른 기기 지점 보충),
-    // 그 위에 바리스 매출을 병합한다.
+    // 클라우드의 공유 데이터(다른 기기 변경 포함)를 먼저 반영하고, 그 위에 바리스 매출을 병합.
+    // 수기 입력값(투자금·임대료·인건비·오픈일)은 mergeBarisResult가 보존.
     setBarisStatus("클라우드 동기화 중...", "");
-    const cloud = await cloudFetch();
-    if (cloud) mergeCloudData(cloud);
+    await flushCloudSync(); // 미저장 로컬 편집을 먼저 클라우드에 반영(신선한 토큰 사용)
+    await cloudPull();
 
     for (const b of result.branches) mergeBarisResult(b);
     const def = getDefaultFilter();
@@ -1489,10 +1496,9 @@ function init() {
   bindEvents();
   renderAll();
 
-  // 클라우드 공유 데이터가 있으면 병합(로컬 수기 입력 보존)해 모든 기기에서 공통 표시
-  cloudFetch().then((cloud) => {
-    if (!cloud || !mergeCloudData(cloud)) return;
-    saveToStorage();
+  // 클라우드 공유 데이터를 불러와(클라우드 우선) 모든 기기에서 공통 표시
+  cloudPull().then((pulled) => {
+    if (!pulled) return;
     if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
       ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;
     }

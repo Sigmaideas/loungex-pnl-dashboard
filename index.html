@@ -86,23 +86,7 @@
       </div>
       <div class="table-wrap">
         <table class="data-table" id="store-table">
-          <thead>
-            <tr>
-              <th data-sort="name">지점명</th>
-              <th data-sort="openDate">오픈일</th>
-              <th data-sort="opDays">운영일자</th>
-              <th data-sort="totalInvestment" class="center">총 투자금액 (VAT 별도)</th>
-              <th data-sort="totalPayout" class="center">총 회수금액</th>
-              <th data-sort="recoveryRate" class="center">회수율</th>
-              <th data-sort="avgRevenue" class="center">월평균 매출 (VAT 별도)</th>
-              <th class="center">투자자 회수 비율</th>
-              <th data-sort="avgPayout" class="center">평균 회수금액 (월)</th>
-              <th data-sort="roi">수익률</th>
-              <th data-sort="monthlyRent" class="center">임대료 (월)</th>
-              <th data-sort="companyPnl">회사 P&amp;L</th>
-              <th class="col-action"></th>
-            </tr>
-          </thead>
+          <thead id="store-thead"><!-- script.js에서 본문과 함께 생성(캐시 불일치 방지) --></thead>
           <tbody id="store-tbody"></tbody>
           <tfoot id="store-tfoot"></tfoot>
         </table>

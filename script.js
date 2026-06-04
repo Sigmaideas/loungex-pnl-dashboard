@@ -306,12 +306,13 @@ function getStoreMetrics(store, startYM, endYM) {
 
   const roi = minMonthlyPayout > 0 ? avgMonthlyPayout / minMonthlyPayout : 0;
 
-  // 운영수익 = 평균매출×0.9 - 임대료 - 인건비 - 평균매출×0.9×0.3 - 평균회수금액
+  // 회사 월 P&L = 월평균매출(VAT별도) - 월평균회수금액 - 월평균매출(VAT별도)×0.3(식자재)
+  //             - 월 임대료 - 인건비(고정 300만)
   const operatingProfit = avgMonthlyRevenue * 0.9
-    - (store.monthlyRent || 0)
-    - (store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)
+    - avgMonthlyPayout
     - avgMonthlyRevenue * 0.9 * 0.3
-    - avgMonthlyPayout;
+    - (store.monthlyRent || 0)
+    - DEFAULT_MONTHLY_LABOR;
 
   const openingProfitInRange = 0; // 회사 P&L 에서 오픈수익 제외
   const companyPnl = operatingProfit;
@@ -327,10 +328,10 @@ function getStoreMetrics(store, startYM, endYM) {
     ? avgMonthlyPayoutFiltered / minMonthlyPayout
     : 0;
   const operatingProfitFiltered = avgMonthlyRevenueFiltered * 0.9
-    - (store.monthlyRent || 0)
-    - (store.monthlyLabor ?? DEFAULT_MONTHLY_LABOR)
+    - avgMonthlyPayoutFiltered
     - avgMonthlyRevenueFiltered * 0.9 * 0.3
-    - avgMonthlyPayoutFiltered;
+    - (store.monthlyRent || 0)
+    - DEFAULT_MONTHLY_LABOR;
   const companyPnlFiltered = operatingProfitFiltered;
 
   return {
@@ -593,13 +594,42 @@ function getSortedStoreRows(startYM, endYM) {
 /* ============================================================
  *  지점 상세 테이블
  * ============================================================ */
+// 지점 상세 표의 컬럼 정의(헤더). 본문/합계 셀과 반드시 같은 순서.
+// 헤더를 본문과 같은 곳(script.js)에서 생성해 캐시로 인한 헤더-본문 어긋남을 방지한다.
+const STORE_COLUMNS = [
+  { label: "지점명", sort: "name" },
+  { label: "오픈일", sort: "openDate" },
+  { label: "운영일자", sort: "opDays" },
+  { label: "총 투자금액 (VAT 별도)", sort: "totalInvestment", center: true },
+  { label: "총 회수금액", sort: "totalPayout", center: true },
+  { label: "회수율", sort: "recoveryRate", center: true },
+  { label: "월평균 매출 (VAT 별도)", sort: "avgRevenue", center: true },
+  { label: "투자자 회수 비율", center: true },
+  { label: "월평균 회수금액", sort: "avgPayout", center: true },
+  { label: "수익률", sort: "roi" },
+  { label: "월 임대료", sort: "monthlyRent", center: true },
+  { label: "회사 P&L", sort: "companyPnl" },
+  { label: "", action: true },
+];
+
+function renderStoreHead() {
+  const thead = document.getElementById("store-thead");
+  if (!thead) return;
+  thead.innerHTML = "<tr>" + STORE_COLUMNS.map((c) => {
+    const cls = [c.center ? "center" : "", c.action ? "col-action" : ""].filter(Boolean).join(" ");
+    const sortAttr = c.sort ? ` data-sort="${c.sort}"` : "";
+    return `<th${sortAttr}${cls ? ` class="${cls}"` : ""}>${escapeHtml(c.label)}</th>`;
+  }).join("") + "</tr>";
+}
+
 function renderStoreTable(startYM, endYM) {
+  renderStoreHead();
   const tbody = document.getElementById("store-tbody");
   const tfoot = document.getElementById("store-tfoot");
 
   if (state.stores.length === 0) {
     tbody.innerHTML =
-      '<tr><td colspan="15" class="empty-state">아직 등록된 지점이 없습니다. "+ 지점 추가" 버튼으로 시작하세요.</td></tr>';
+      `<tr><td colspan="${STORE_COLUMNS.length}" class="empty-state">아직 등록된 지점이 없습니다. "+ 지점 추가" 버튼으로 시작하세요.</td></tr>`;
     tfoot.innerHTML = "";
     updateSortHeaders();
     return;
@@ -1443,19 +1473,19 @@ function bindEvents() {
     renderMonthlyTable();
   });
 
-  // 정렬
-  document.querySelectorAll("#store-table thead th[data-sort]").forEach((th) => {
-    th.addEventListener("click", () => {
-      const k = th.dataset.sort;
-      if (ui.sortKey === k) {
-        ui.sortDir = ui.sortDir === "asc" ? "desc" : "asc";
-      } else {
-        ui.sortKey = k;
-        ui.sortDir = "asc";
-      }
-      renderStoreTable(ui.filterStart, ui.filterEnd);
-      renderStoreSelect();
-    });
+  // 정렬 (헤더가 매 렌더마다 재생성되므로 위임 방식으로 바인딩)
+  document.getElementById("store-thead").addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-sort]");
+    if (!th) return;
+    const k = th.dataset.sort;
+    if (ui.sortKey === k) {
+      ui.sortDir = ui.sortDir === "asc" ? "desc" : "asc";
+    } else {
+      ui.sortKey = k;
+      ui.sortDir = "asc";
+    }
+    renderStoreTable(ui.filterStart, ui.filterEnd);
+    renderStoreSelect();
   });
 
   // 삭제 + 타입 토글 위임

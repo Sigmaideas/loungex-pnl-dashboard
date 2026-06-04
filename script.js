@@ -46,6 +46,7 @@ const ui = {
   sortKey: "avgRevenue",
   sortDir: "desc",
   selectedStoreId: null,
+  barisMode: "import",  // "import"(매출 전체 가져오기) | "sync"(로그인 후 클라우드 최신만)
 };
 
 let revenueChart = null;
@@ -1267,11 +1268,22 @@ function mergeBarisResult(result) {
 /* ============================================================
  *  바리스 모달
  * ============================================================ */
-function openBarisModal() {
+// mode: "import"(업데이트=바리스 매출 전체 가져오기) | "sync"(로그인 후 클라우드 최신만 빠르게)
+function openBarisModal(mode = "import") {
+  ui.barisMode = mode === "sync" ? "sync" : "import";
   const modal = document.getElementById("modal-baris");
   const form = document.getElementById("baris-form");
   form.reset();
   setBarisStatus("", "");
+  const h = modal.querySelector("h3");
+  const submitBtn = document.getElementById("btn-baris-submit");
+  if (ui.barisMode === "sync") {
+    if (h) h.textContent = "로그인 (최신 데이터 동기화)";
+    if (submitBtn) submitBtn.textContent = "로그인";
+  } else {
+    if (h) h.textContent = "바리스에서 매출 가져오기";
+    if (submitBtn) submitBtn.textContent = "가져오기";
+  }
   modal.hidden = false;
   setTimeout(() => form.elements.account.focus(), 50);
 }
@@ -1348,6 +1360,30 @@ async function handleBarisSubmit() {
     setBarisStatus("관리자 ID와 비밀번호를 입력하세요.", "error");
     return;
   }
+
+  if (ui.barisMode === "sync") {
+    // 빠른 로그인 + 클라우드 최신만 반영(바리스 매출 전체 재조회는 하지 않음)
+    setBarisBtnsDisabled(true);
+    try {
+      setBarisStatus("로그인 중...", "");
+      const auth = await barisLogin(account, password);
+      setBarisToken(auth.accessToken);
+      setBarisStatus("최신 데이터 불러오는 중...", "");
+      await cloudPull();
+      refreshAfterDataChange();
+      setBarisStatus("✓ 최신 데이터를 불러왔습니다.", "ok");
+      showToast("동기화 완료");
+      setTimeout(closeBarisModal, 1000);
+    } catch (err) {
+      setBarisStatus(err.message || String(err), "error");
+    } finally {
+      setBarisBtnsDisabled(false);
+      form.elements.password.value = "";
+      form.elements.account.value = "";
+    }
+    return;
+  }
+
   await runBarisImport({ account, password }, setBarisBtnsDisabled);
   // 비밀번호·ID 즉시 제거
   form.elements.password.value = "";
@@ -1513,7 +1549,7 @@ function bindEvents() {
   });
 
   // 바리스 임포트
-  document.getElementById("btn-baris").addEventListener("click", openBarisModal);
+  document.getElementById("btn-baris").addEventListener("click", () => openBarisModal("import"));
   document.querySelectorAll("#modal-baris [data-close-baris]").forEach((el) =>
     el.addEventListener("click", closeBarisModal)
   );
@@ -1550,6 +1586,21 @@ function escapeHtml(s) {
 /* ============================================================
  *  부트
  * ============================================================ */
+// 데이터가 통째로 바뀐 뒤(클라우드 반영 등) 선택 지점/필터를 보정하고 다시 그림
+function refreshAfterDataChange() {
+  if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
+    ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;
+  }
+  const def = getDefaultFilter();
+  ui.filterStart = def.start;
+  ui.filterEnd = def.end;
+  const se = document.getElementById("filter-start");
+  const ee = document.getElementById("filter-end");
+  if (se) se.value = ui.filterStart;
+  if (ee) ee.value = ui.filterEnd;
+  renderAll();
+}
+
 function init() {
   // 초기 데이터 없음(빈 상태로 시작). 데이터는 "업데이트"/직접 입력/클라우드에서 가져옴.
   loadFromStorage();
@@ -1559,20 +1610,14 @@ function init() {
   bindEvents();
   renderAll();
 
-  // 클라우드 공유 데이터를 불러와(클라우드 우선) 모든 기기에서 공통 표시
+  // 클라우드 공유 데이터를 불러와(최근 저장본 우선) 모든 기기에서 공통 표시
   cloudPull().then((pulled) => {
-    if (!pulled) return;
-    if (!ui.selectedStoreId || !state.stores.find((s) => s.id === ui.selectedStoreId)) {
-      ui.selectedStoreId = state.stores[0] ? state.stores[0].id : null;
+    if (pulled) refreshAfterDataChange();
+    // 토큰이 없으면(미로그인/만료) 자동으로 로그인 창을 띄워 최신 데이터 동기화 유도
+    if (!getBarisToken()) {
+      openBarisModal("sync");
+      setBarisStatus("다른 기기의 최신 데이터를 보려면 로그인하세요.", "");
     }
-    const def = getDefaultFilter();
-    ui.filterStart = def.start;
-    ui.filterEnd = def.end;
-    const se = document.getElementById("filter-start");
-    const ee = document.getElementById("filter-end");
-    if (se) se.value = ui.filterStart;
-    if (ee) ee.value = ui.filterEnd;
-    renderAll();
   });
 }
 

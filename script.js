@@ -388,7 +388,48 @@ function getDefaultFilter() {
 /* ============================================================
  *  렌더 (전체)
  * ============================================================ */
+// 로그인 버튼 텍스트를 로그인 상태에 맞게 갱신
+function updateLoginButton() {
+  const btn = document.getElementById("btn-login");
+  if (btn) btn.textContent = getBarisToken() ? "로그아웃" : "로그인";
+}
+
+// 로그아웃 상태(토큰 없음)에서 보여줄 잠금 화면 — 데이터 숨김
+function renderLocked() {
+  ["kpi-roi", "kpi-company", "kpi-stores", "kpi-revenue"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "-";
+  });
+  ["kpi-roi-sub", "kpi-company-sub", "kpi-stores-sub", "kpi-revenue-sub"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  });
+  if (revenueChart) { revenueChart.destroy(); revenueChart = null; }
+  const wrap = document.querySelector(".chart-card .chart-wrap");
+  if (wrap) wrap.innerHTML = '<div class="empty-state">로그인하면 데이터가 표시됩니다.</div>';
+  renderStoreHead();
+  const stb = document.getElementById("store-tbody");
+  if (stb) stb.innerHTML = `<tr><td colspan="${STORE_COLUMNS.length}" class="empty-state">로그인이 필요합니다. 우측 상단 "로그인"을 눌러주세요.</td></tr>`;
+  const stf = document.getElementById("store-tfoot");
+  if (stf) stf.innerHTML = "";
+  const mtb = document.getElementById("monthly-tbody");
+  if (mtb) mtb.innerHTML = '<tr><td colspan="7" class="empty-state">로그인이 필요합니다.</td></tr>';
+  const mtf = document.getElementById("monthly-tfoot");
+  if (mtf) mtf.innerHTML = "";
+  const sel = document.getElementById("monthly-store-select");
+  if (sel) sel.innerHTML = "";
+  const cp = document.getElementById("chart-period");
+  if (cp) cp.textContent = "";
+}
+
 function renderAll() {
+  updateLoginButton();
+  // 로그아웃 상태에서는 데이터를 보여주지 않음
+  if (!getBarisToken()) {
+    renderLocked();
+    return;
+  }
+
   const startYM = ui.filterStart;
   const endYM = ui.filterEnd;
 
@@ -400,6 +441,18 @@ function renderAll() {
 
   document.getElementById("chart-period").textContent =
     state.stores.length === 0 ? "" : `${startYM} ~ ${endYM}`;
+}
+
+// 로그아웃: 토큰·데이터 삭제 후 잠금 화면
+function logout() {
+  localStorage.removeItem(BARIS_TOKEN_STORAGE);
+  localStorage.removeItem(STORAGE_KEY);
+  state.stores = [];
+  state.monthly = [];
+  state.updatedAt = 0;
+  ui.selectedStoreId = null;
+  renderAll();
+  showToast("로그아웃되었습니다.");
 }
 
 /* ============================================================
@@ -1581,8 +1634,11 @@ function bindEvents() {
     closeModal();
   });
 
-  // 로그인(최신 데이터 동기화)
-  document.getElementById("btn-login").addEventListener("click", () => openBarisModal("sync"));
+  // 로그인 ↔ 로그아웃 토글
+  document.getElementById("btn-login").addEventListener("click", () => {
+    if (getBarisToken()) logout();
+    else openBarisModal("sync");
+  });
 
   // 업데이트(바리스 매출 갱신). 이미 로그인돼 있으면 비번 재입력 없이 토큰으로 바로 실행.
   document.getElementById("btn-baris").addEventListener("click", () => {

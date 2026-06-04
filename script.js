@@ -37,6 +37,7 @@ function getStoreType(store) {
 const state = {
   stores: [],   // {id, name, openDate, openingProfit, operatingProfitRate, totalInvestment}
   monthly: [],  // {storeId, yearMonth, revenue, investorPayout}
+  updatedAt: 0, // 마지막 로컬 수정 시각(ms). 기기 간 "가장 최근 저장본 우선" 판단용.
 };
 
 const ui = {
@@ -155,12 +156,13 @@ const parseNumberInput = (str) => {
 function saveLocalOnly() {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({ stores: state.stores, monthly: state.monthly })
+    JSON.stringify({ stores: state.stores, monthly: state.monthly, updatedAt: state.updatedAt })
   );
 }
 
-// 모든 데이터 변경 시 호출됨 → 로컬 저장 + 클라우드 자동 동기화(디바운스)
+// 모든 데이터 변경 시 호출됨 → 수정시각 갱신 + 로컬 저장 + 클라우드 자동 동기화(디바운스)
 function saveToStorage() {
+  state.updatedAt = Date.now(); // 이 기기에서 방금 수정함
   saveLocalOnly();
   scheduleCloudSync();
 }
@@ -182,6 +184,7 @@ function loadFromStorage() {
       return false;
     state.stores = parsed.stores;
     state.monthly = parsed.monthly;
+    state.updatedAt = parsed.updatedAt || 0;
     return true;
   } catch {
     return false;
@@ -202,7 +205,7 @@ async function cloudSave({ silent = false } = {}) {
     const r = await fetch(`${CLOUD_BASE}/__data`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ stores: state.stores, monthly: state.monthly }),
+      body: JSON.stringify({ stores: state.stores, monthly: state.monthly, updatedAt: state.updatedAt }),
     });
     if (r.status === 401) {
       localStorage.removeItem(BARIS_TOKEN_STORAGE);
@@ -219,7 +222,7 @@ async function cloudSave({ silent = false } = {}) {
   }
 }
 
-// 사용자가 직접 입력하는 지점 필드(바리스/클라우드로 함부로 덮어쓰면 안 되는 값)
+// 사용자가 직접 입력하는 지점 필드(참고용)
 const MANUAL_STORE_FIELDS = [
   "totalInvestment", "monthlyRent", "monthlyLabor",
   "openingProfit", "openDate", "operatingProfitRate", "type", "name", "payoutRate",
@@ -241,56 +244,27 @@ async function cloudFetch() {
   }
 }
 
-// 클라우드 데이터를 현재 state에 병합한다.
-//  - 매출/신규 지점은 클라우드 기준(다른 기기 변경 반영)
-//  - 단, 이 기기에서 입력한 수기 값(투자금·임대료·오픈일·회수비율 등)은 로컬을 우선 보존
-//    → 클라우드에 아직 저장 안 된 입력이 업데이트로 날아가지 않음
-function applyCloud(cloud) {
-  if (!cloud || !Array.isArray(cloud.stores) || !Array.isArray(cloud.monthly)) return false;
-  const meaningful = (v) =>
-    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
-
-  const localStores = new Map(state.stores.map((s) => [s.id, s]));
-  const cloudIds = new Set(cloud.stores.map((s) => s.id));
-
-  // 클라우드 지점 + 로컬 수기필드 우선 보존
-  const mergedStores = cloud.stores.map((cs) => {
-    const ls = localStores.get(cs.id);
-    const merged = { ...cs };
-    if (ls) for (const f of MANUAL_STORE_FIELDS) if (meaningful(ls[f])) merged[f] = ls[f];
-    return merged;
-  });
-  // 로컬에만 있는 지점 보존
-  for (const ls of state.stores) if (!cloudIds.has(ls.id)) mergedStores.push({ ...ls });
-  state.stores = mergedStores;
-
-  // 월별: 클라우드 기준 + 로컬 회수금/운영일수 보존, 로컬 전용 월 보존
-  const cloudKeys = new Set(cloud.monthly.map((m) => m.storeId + "|" + m.yearMonth));
-  const localMonthly = new Map(state.monthly.map((m) => [m.storeId + "|" + m.yearMonth, m]));
-  const mergedMonthly = cloud.monthly.map((cm) => {
-    const lm = localMonthly.get(cm.storeId + "|" + cm.yearMonth);
-    const merged = { ...cm };
-    if (lm) {
-      if (meaningful(lm.investorPayout)) merged.investorPayout = lm.investorPayout;
-      if (meaningful(lm.operatingDays)) merged.operatingDays = lm.operatingDays;
-    }
-    return merged;
-  });
-  for (const lm of state.monthly) {
-    if (!cloudKeys.has(lm.storeId + "|" + lm.yearMonth)) mergedMonthly.push({ ...lm });
-  }
-  state.monthly = mergedMonthly;
-
-  saveLocalOnly(); // 동기화 트리거 없이 로컬 저장
-  return true;
-}
-
-// 클라우드에서 받아 병합. 비어 있거나 토큰 없으면 변경 없음.
+// 클라우드에서 받아 "가장 최근 저장본 우선"으로 반영.
+//  - 클라우드가 내 로컬보다 최신이면 → 클라우드로 교체(다른 기기 변경이 보임)
+//  - 내 로컬이 더 최신이면 → 로컬 유지(미저장 입력 보호) + 클라우드로 밀어올림
+//  - 클라우드가 비었으면 → 로컬 유지
 async function cloudPull() {
   const cloud = await cloudFetch();
   if (!cloud) return false;
   if (cloud.stores.length === 0 && cloud.monthly.length === 0) return false;
-  return applyCloud(cloud);
+  const cloudTime = cloud.updatedAt || 0;
+  const localTime = state.updatedAt || 0;
+  if (cloudTime > localTime) {
+    // 클라우드가 더 최신 → 클라우드 채택
+    state.stores = cloud.stores;
+    state.monthly = cloud.monthly;
+    state.updatedAt = cloudTime;
+    saveLocalOnly();
+    return true;
+  }
+  // 로컬이 더(또는 같게) 최신 → 로컬 유지. 로컬이 더 최신이면 클라우드로 동기화.
+  if (localTime > cloudTime) scheduleCloudSync();
+  return false;
 }
 
 function resetStorage() {
@@ -1329,8 +1303,8 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
-    // 클라우드의 공유 매출/지점을 병합하되, 이 기기의 수기 입력(투자금·임대료·오픈일 등)은
-    // applyCloud가 로컬 우선으로 보존 → 업데이트로 입력값이 사라지지 않음. 그 위에 바리스 매출 병합.
+    // 가장 최근 저장본 우선으로 클라우드 반영(다른 기기 변경 반영 + 내 미저장 입력 보호).
+    // 그 위에 바리스 매출을 병합하고, 끝에 저장하며 이 결과를 최신본으로 만든다.
     setBarisStatus("클라우드 동기화 중...", "");
     await cloudPull();
 

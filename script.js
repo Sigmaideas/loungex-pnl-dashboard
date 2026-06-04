@@ -615,7 +615,7 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center"><span class="cell-editable" data-edit="store" data-field="totalInvestment" data-id="${store.id}" data-input-type="number">${formatCurrency(store.totalInvestment)}</span></td>
       <td class="num center cell-readonly">${formatCurrency(m.totalPayoutCalculated)}</td>
       <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
-      <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue)}</td>
+      <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue * 0.9)}</td>
       <td class="center"><select class="rate-select" data-id="${store.id}">
         <option value="0.2"${(store.payoutRate ?? 0.2) === 0.2 ? " selected" : ""}>20%</option>
         <option value="0.25"${(store.payoutRate ?? 0.2) === 0.25 ? " selected" : ""}>25%</option>
@@ -669,7 +669,7 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center">${formatCurrency(sum.investment)}</td>
       <td class="num center">${formatCurrency(sum.totalPayout)}</td>
       <td class="num center">${renderRecoveryBar(sum.investment > 0 ? sum.totalPayout / sum.investment : 0, sum.investment > 0)}</td>
-      <td class="num center">${formatCurrency(avgRevenueAll)}</td>
+      <td class="num center">${formatCurrency(avgRevenueAll * 0.9)}</td>
       <td></td>
       <td class="num center ${avgPayoutAll >= sum.minPayout / Math.max(rows.length, 1) ? "pos" : ""}">${formatCurrency(avgPayoutAll)}</td>
       <td class="num ${formatRoiDisplay(avgRoi, aggregateMinPayout).cls}">${formatRoiDisplay(avgRoi, aggregateMinPayout).text}</td>

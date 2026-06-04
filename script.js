@@ -173,14 +173,6 @@ function scheduleCloudSync() {
   cloudSyncTimer = setTimeout(() => { cloudSave({ silent: true }); }, 1500);
 }
 
-// 대기 중인 자동 저장을 즉시 실행(데이터가 있을 때만). 업데이트 직전 미저장 편집 보존용.
-async function flushCloudSync() {
-  if (!cloudSyncTimer) return;
-  clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = null;
-  if (state.stores.length > 0) await cloudSave({ silent: true });
-}
-
 function loadFromStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -249,17 +241,56 @@ async function cloudFetch() {
   }
 }
 
-// 클라우드를 "공유 원본"으로 보고 현재 데이터를 클라우드 내용으로 교체한다.
-//  - 다른 기기에서 저장한 변경(기존 값 수정 포함)이 그대로 보임.
-//  - 단, 클라우드가 비어 있으면(지점 0) 로컬을 지우지 않음(빈 클라우드로 인한 유실 방지).
+// 클라우드 데이터를 현재 state에 병합한다.
+//  - 매출/신규 지점은 클라우드 기준(다른 기기 변경 반영)
+//  - 단, 이 기기에서 입력한 수기 값(투자금·임대료·오픈일·회수비율 등)은 로컬을 우선 보존
+//    → 클라우드에 아직 저장 안 된 입력이 업데이트로 날아가지 않음
+function applyCloud(cloud) {
+  if (!cloud || !Array.isArray(cloud.stores) || !Array.isArray(cloud.monthly)) return false;
+  const meaningful = (v) =>
+    v !== undefined && v !== null && v !== "" && !(typeof v === "number" && v === 0);
+
+  const localStores = new Map(state.stores.map((s) => [s.id, s]));
+  const cloudIds = new Set(cloud.stores.map((s) => s.id));
+
+  // 클라우드 지점 + 로컬 수기필드 우선 보존
+  const mergedStores = cloud.stores.map((cs) => {
+    const ls = localStores.get(cs.id);
+    const merged = { ...cs };
+    if (ls) for (const f of MANUAL_STORE_FIELDS) if (meaningful(ls[f])) merged[f] = ls[f];
+    return merged;
+  });
+  // 로컬에만 있는 지점 보존
+  for (const ls of state.stores) if (!cloudIds.has(ls.id)) mergedStores.push({ ...ls });
+  state.stores = mergedStores;
+
+  // 월별: 클라우드 기준 + 로컬 회수금/운영일수 보존, 로컬 전용 월 보존
+  const cloudKeys = new Set(cloud.monthly.map((m) => m.storeId + "|" + m.yearMonth));
+  const localMonthly = new Map(state.monthly.map((m) => [m.storeId + "|" + m.yearMonth, m]));
+  const mergedMonthly = cloud.monthly.map((cm) => {
+    const lm = localMonthly.get(cm.storeId + "|" + cm.yearMonth);
+    const merged = { ...cm };
+    if (lm) {
+      if (meaningful(lm.investorPayout)) merged.investorPayout = lm.investorPayout;
+      if (meaningful(lm.operatingDays)) merged.operatingDays = lm.operatingDays;
+    }
+    return merged;
+  });
+  for (const lm of state.monthly) {
+    if (!cloudKeys.has(lm.storeId + "|" + lm.yearMonth)) mergedMonthly.push({ ...lm });
+  }
+  state.monthly = mergedMonthly;
+
+  saveLocalOnly(); // 동기화 트리거 없이 로컬 저장
+  return true;
+}
+
+// 클라우드에서 받아 병합. 비어 있거나 토큰 없으면 변경 없음.
 async function cloudPull() {
   const cloud = await cloudFetch();
   if (!cloud) return false;
   if (cloud.stores.length === 0 && cloud.monthly.length === 0) return false;
-  state.stores = cloud.stores;
-  state.monthly = cloud.monthly;
-  saveLocalOnly(); // 받은 내용을 그대로 되올리지 않도록 동기화 트리거 없이 저장
-  return true;
+  return applyCloud(cloud);
 }
 
 function resetStorage() {
@@ -1298,10 +1329,9 @@ async function runBarisImport(importArgs, disableBtns) {
       onProgress: (msg) => setBarisStatus(msg, ""),
     });
 
-    // 클라우드의 공유 데이터(다른 기기 변경 포함)를 먼저 반영하고, 그 위에 바리스 매출을 병합.
-    // 수기 입력값(투자금·임대료·인건비·오픈일)은 mergeBarisResult가 보존.
+    // 클라우드의 공유 매출/지점을 병합하되, 이 기기의 수기 입력(투자금·임대료·오픈일 등)은
+    // applyCloud가 로컬 우선으로 보존 → 업데이트로 입력값이 사라지지 않음. 그 위에 바리스 매출 병합.
     setBarisStatus("클라우드 동기화 중...", "");
-    await flushCloudSync(); // 미저장 로컬 편집을 먼저 클라우드에 반영(신선한 토큰 사용)
     await cloudPull();
 
     for (const b of result.branches) mergeBarisResult(b);
@@ -1444,26 +1474,6 @@ function bindEvents() {
 
 
   document.getElementById("btn-save").addEventListener("click", cloudSave);
-
-  document.getElementById("btn-reset").addEventListener("click", () => {
-    openConfirm({
-      title: "데이터 초기화",
-      message: "모든 데이터를 삭제합니다. 계속하시겠습니까?",
-      onConfirm: () => {
-        state.stores = [];
-        state.monthly = [];
-        ui.selectedStoreId = null;
-        saveToStorage();
-        const def = getDefaultFilter();
-        ui.filterStart = def.start;
-        ui.filterEnd = def.end;
-        document.getElementById("filter-start").value = ui.filterStart;
-        document.getElementById("filter-end").value = ui.filterEnd;
-        renderAll();
-        showToast("초기화되었습니다.");
-      },
-    });
-  });
 
   document.getElementById("btn-add-store").addEventListener("click", addStore);
   document.getElementById("btn-add-month").addEventListener("click", addMonth);

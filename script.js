@@ -230,7 +230,7 @@ async function cloudSave({ silent = false } = {}) {
 // 사용자가 직접 입력하는 지점 필드(바리스/클라우드로 함부로 덮어쓰면 안 되는 값)
 const MANUAL_STORE_FIELDS = [
   "totalInvestment", "monthlyRent", "monthlyLabor",
-  "openingProfit", "openDate", "operatingProfitRate", "type", "name",
+  "openingProfit", "openDate", "operatingProfitRate", "type", "name", "payoutRate",
 ];
 
 // 클라우드 데이터를 받아오기만 함(state 변경 없음). 없거나 실패 시 null.
@@ -295,10 +295,12 @@ function getStoreMetrics(store, startYM, endYM) {
   // 식자재비 = 평균매출 × 30%
   const materialCost = avgMonthlyRevenue * 0.3;
 
+  // 투자자 회수 비율(지점별, 기본 20%)
+  const payoutRate = store.payoutRate ?? 0.2;
   const minMonthlyPayout = investment / 60;
-  const avgMonthlyPayout = avgMonthlyRevenue * 0.9 * 0.2;
-  // 총 회수금액 = 누적 매출 × 90% × 20% (월별 실적의 투자자 회수금 공식과 동일)
-  const totalPayoutCalculated = totalRevenueAll * 0.9 * 0.2;
+  const avgMonthlyPayout = avgMonthlyRevenue * 0.9 * payoutRate;
+  // 총 회수금액 = 누적 매출 × 90% × 회수비율 (월별 실적의 투자자 회수금 공식과 동일)
+  const totalPayoutCalculated = totalRevenueAll * 0.9 * payoutRate;
   // 회수율 = 총 회수금액 / 총 투자금액
   const recoveryRate = investment > 0 ? totalPayoutCalculated / investment : 0;
 
@@ -320,7 +322,7 @@ function getStoreMetrics(store, startYM, endYM) {
   const avgMonthlyRevenueFiltered = filteredOpDays > 0
     ? (totalRevenue / filteredOpDays) * 30
     : 0;
-  const avgMonthlyPayoutFiltered = avgMonthlyRevenueFiltered * 0.9 * 0.2;
+  const avgMonthlyPayoutFiltered = avgMonthlyRevenueFiltered * 0.9 * payoutRate;
   const roiFiltered = minMonthlyPayout > 0
     ? avgMonthlyPayoutFiltered / minMonthlyPayout
     : 0;
@@ -614,9 +616,13 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center cell-readonly">${formatCurrency(m.totalPayoutCalculated)}</td>
       <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
       <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue)}</td>
-      <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
+      <td class="center"><select class="rate-select" data-id="${store.id}">
+        <option value="0.2"${(store.payoutRate ?? 0.2) === 0.2 ? " selected" : ""}>20%</option>
+        <option value="0.25"${(store.payoutRate ?? 0.2) === 0.25 ? " selected" : ""}>25%</option>
+      </select></td>
       <td class="num center cell-readonly ${m.avgMonthlyPayout >= m.minMonthlyPayout && m.minMonthlyPayout > 0 ? "pos" : ""}">${formatCurrency(m.avgMonthlyPayout)}</td>
       <td class="num cell-readonly ${formatRoiDisplay(m.roi, m.minMonthlyPayout).cls}">${formatRoiDisplay(m.roi, m.minMonthlyPayout).text}</td>
+      <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
       <td>
         <div class="pnl-stack">
           <div class="pnl-line ${m.operatingProfit < 0 ? "neg" : "accent"}">
@@ -645,11 +651,13 @@ function renderStoreTable(startYM, endYM) {
     acc.companyPnl += r.companyPnl;
     acc.monthsCount += getMonthlyForStore(r.store.id).length;
     acc.avgRevenue += r.avgMonthlyRevenue;
+    acc.avgPayout += r.avgMonthlyPayout;
     return acc;
-  }, { investment: 0, totalPayout: 0, monthlyRent: 0, monthlyLabor: 0, materialCost: 0, revenueAll: 0, payoutAll: 0, minPayout: 0, openingProfit: 0, operatingProfit: 0, companyPnl: 0, monthsCount: 0, avgRevenue: 0 });
+  }, { investment: 0, totalPayout: 0, monthlyRent: 0, monthlyLabor: 0, materialCost: 0, revenueAll: 0, payoutAll: 0, minPayout: 0, openingProfit: 0, operatingProfit: 0, companyPnl: 0, monthsCount: 0, avgRevenue: 0, avgPayout: 0 });
 
   const avgRevenueAll = sum.avgRevenue;
-  const avgPayoutAll = avgRevenueAll * 0.9 * 0.2;
+  // 지점별 회수비율이 다르므로 합계는 지점별 평균 회수금액을 합산
+  const avgPayoutAll = sum.avgPayout;
   const aggregateMinPayout = sum.investment / 60;
   const avgRoi = aggregateMinPayout > 0 ? avgPayoutAll / aggregateMinPayout : 0;
 
@@ -662,9 +670,10 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center">${formatCurrency(sum.totalPayout)}</td>
       <td class="num center">${renderRecoveryBar(sum.investment > 0 ? sum.totalPayout / sum.investment : 0, sum.investment > 0)}</td>
       <td class="num center">${formatCurrency(avgRevenueAll)}</td>
-      <td class="num center">${formatCurrency(sum.monthlyRent)}</td>
+      <td></td>
       <td class="num center ${avgPayoutAll >= sum.minPayout / Math.max(rows.length, 1) ? "pos" : ""}">${formatCurrency(avgPayoutAll)}</td>
       <td class="num ${formatRoiDisplay(avgRoi, aggregateMinPayout).cls}">${formatRoiDisplay(avgRoi, aggregateMinPayout).text}</td>
+      <td class="num center">${formatCurrency(sum.monthlyRent)}</td>
       <td>
         <div class="pnl-stack">
           <div class="pnl-line ${sum.operatingProfit < 0 ? "neg" : "accent"}"><span class="value">${formatCurrency(sum.operatingProfit)}</span></div>
@@ -754,7 +763,7 @@ function renderMonthlyTable() {
   let totalOpDays = 0;
   tbody.innerHTML = rows.map((m) => {
     const opProfit = (m.revenue || 0) * 0.9 * 0.1;  // 운영수익 = 매출 × 90% × 10% (= 9%)
-    const payout = (m.revenue || 0) * 0.9 * 0.2;    // 투자자 회수금 = 매출 × 90% × 20% (= 18%)
+    const payout = (m.revenue || 0) * 0.9 * (store.payoutRate ?? 0.2); // 투자자 회수금 = 매출 × 90% × 회수비율
     const monthDays = daysInYearMonth(m.yearMonth);
     const opDays = getOperatingDays(store, m);
     totalOpDays += opDays;
@@ -774,7 +783,7 @@ function renderMonthlyTable() {
   }).join("");
 
   const totalRev = rows.reduce((s, m) => s + (m.revenue || 0), 0);
-  const totalPayout = totalRev * 0.9 * 0.2; // 회수금 = 매출 × 90% × 20%
+  const totalPayout = totalRev * 0.9 * (store.payoutRate ?? 0.2); // 회수금 = 매출 × 90% × 회수비율
   const totalOp = totalRev * 0.9 * 0.1;     // 운영수익 = 매출 × 90% × 10%
 
   tfoot.innerHTML = `
@@ -1467,6 +1476,17 @@ function bindEvents() {
       toggleStoreType(tChip.dataset.toggleType);
       return;
     }
+  });
+
+  // 투자자 회수 비율 드롭다운 변경
+  document.body.addEventListener("change", (e) => {
+    const sel = e.target.closest(".rate-select");
+    if (!sel) return;
+    const store = state.stores.find((s) => s.id === sel.dataset.id);
+    if (!store) return;
+    store.payoutRate = parseFloat(sel.value);
+    saveToStorage();
+    renderAll();
   });
 
   // 모달

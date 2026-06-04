@@ -1147,10 +1147,15 @@ async function barisChangeBranch(branchID, token) {
   return newToken;
 }
 
-async function importFromBaris({ account, password, startYM, endYM, onProgress }) {
-  onProgress?.("로그인 중...");
-  const auth = await barisLogin(account, password);
-  const token = auth.accessToken;
+async function importFromBaris({ account, password, token: presetToken, startYM, endYM, onProgress }) {
+  let token;
+  if (presetToken) {
+    token = presetToken; // 이미 로그인된 토큰 재사용(비번 재입력 불필요)
+  } else {
+    onProgress?.("로그인 중...");
+    const auth = await barisLogin(account, password);
+    token = auth.accessToken;
+  }
   setBarisToken(token); // 클라우드 저장/불러오기 인증에 재사용
 
   onProgress?.("지점 목록 조회 중...");
@@ -1275,8 +1280,13 @@ function openBarisModal(mode = "import") {
   const form = document.getElementById("baris-form");
   form.reset();
   setBarisStatus("", "");
+  // 진행상황 모드에서 숨겼던 요소 복원
+  const desc = modal.querySelector(".muted");
+  if (desc) desc.style.display = "";
+  form.style.display = "";
   const h = modal.querySelector("h3");
   const submitBtn = document.getElementById("btn-baris-submit");
+  if (submitBtn) submitBtn.style.display = "";
   if (ui.barisMode === "sync") {
     if (h) h.textContent = "로그인 (최신 데이터 동기화)";
     if (submitBtn) submitBtn.textContent = "로그인";
@@ -1286,6 +1296,21 @@ function openBarisModal(mode = "import") {
   }
   modal.hidden = false;
   setTimeout(() => form.elements.account.focus(), 50);
+}
+
+// 로그인 입력 없이 진행상황만 보여주는 모달(이미 로그인된 상태에서 업데이트할 때)
+function openBarisProgress(title) {
+  const modal = document.getElementById("modal-baris");
+  const h = modal.querySelector("h3");
+  const desc = modal.querySelector(".muted");
+  const form = document.getElementById("baris-form");
+  const submitBtn = document.getElementById("btn-baris-submit");
+  if (h) h.textContent = title;
+  if (desc) desc.style.display = "none";
+  form.style.display = "none";
+  if (submitBtn) submitBtn.style.display = "none";
+  setBarisStatus("", "");
+  modal.hidden = false;
 }
 
 const BARIS_DEFAULT_START_YM = "2026-01";
@@ -1341,7 +1366,15 @@ async function runBarisImport(importArgs, disableBtns) {
     showToast(`${result.branches.length}개 지점을 업데이트했습니다.`);
     setTimeout(closeBarisModal, 1800);
   } catch (err) {
-    setBarisStatus(err.message || String(err), "error");
+    const msg = err.message || String(err);
+    // 토큰 만료(401) 등 인증 실패면 로그인 재요청
+    if (/401|로그인|관리자 정보/.test(msg)) {
+      localStorage.removeItem(BARIS_TOKEN_STORAGE);
+      openBarisModal("import");
+      setBarisStatus("로그인이 만료됐습니다. 다시 로그인해 주세요.", "error");
+    } else {
+      setBarisStatus(msg, "error");
+    }
   } finally {
     disableBtns(false);
   }
@@ -1548,8 +1581,16 @@ function bindEvents() {
     closeModal();
   });
 
-  // 바리스 임포트
-  document.getElementById("btn-baris").addEventListener("click", () => openBarisModal("import"));
+  // 로그인(최신 데이터 동기화)
+  document.getElementById("btn-login").addEventListener("click", () => openBarisModal("sync"));
+
+  // 업데이트(바리스 매출 갱신). 이미 로그인돼 있으면 비번 재입력 없이 토큰으로 바로 실행.
+  document.getElementById("btn-baris").addEventListener("click", () => {
+    const token = getBarisToken();
+    if (!token) { openBarisModal("import"); return; }
+    openBarisProgress("바리스 매출 업데이트 중...");
+    runBarisImport({ token }, setBarisBtnsDisabled);
+  });
   document.querySelectorAll("#modal-baris [data-close-baris]").forEach((el) =>
     el.addEventListener("click", closeBarisModal)
   );

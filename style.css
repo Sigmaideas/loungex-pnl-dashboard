@@ -507,7 +507,7 @@ input, select {
 /* 회수율 가로 막대 (100% 기준선) */
 .recovery-bar {
   position: relative;
-  width: 70px;
+  width: 91px;
   height: 18px;
   background: var(--surface-2);
   border: 1px solid var(--border);

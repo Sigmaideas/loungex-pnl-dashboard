@@ -301,8 +301,8 @@ function getStoreMetrics(store, startYM, endYM) {
   // 식자재비 = 평균매출 × 30%
   const materialCost = avgMonthlyRevenue * 0.3;
 
-  // 투자자 회수 비율(지점별, 기본 20%)
-  const payoutRate = store.payoutRate ?? 0.2;
+  // 투자자 회수 비율(전 지점 20% 통일)
+  const payoutRate = 0.2;
   const minMonthlyPayout = investment / 60;
   const avgMonthlyPayout = avgMonthlyRevenue * 0.9 * payoutRate;
   // 총 회수금액 = 누적 매출 × 90% × 회수비율 (월별 실적의 투자자 회수금 공식과 동일)
@@ -705,10 +705,7 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center cell-readonly">${formatCurrency(m.totalPayoutCalculated)}</td>
       <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
       <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue * 0.9)}</td>
-      <td class="center"><select class="rate-select" data-id="${store.id}">
-        <option value="0.2"${(store.payoutRate ?? 0.2) === 0.2 ? " selected" : ""}>20%</option>
-        <option value="0.25"${(store.payoutRate ?? 0.2) === 0.25 ? " selected" : ""}>25%</option>
-      </select></td>
+      <td class="num center cell-readonly">20%</td>
       <td class="num center cell-readonly ${m.avgMonthlyPayout >= m.minMonthlyPayout && m.minMonthlyPayout > 0 ? "pos" : ""}">${formatCurrency(m.avgMonthlyPayout)}</td>
       <td class="num cell-readonly ${formatRoiDisplay(m.roi, m.minMonthlyPayout).cls}">${formatRoiDisplay(m.roi, m.minMonthlyPayout).text}</td>
       <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
@@ -852,7 +849,7 @@ function renderMonthlyTable() {
   let totalOpDays = 0;
   tbody.innerHTML = rows.map((m) => {
     const opProfit = (m.revenue || 0) * 0.9 * 0.1;  // 운영수익 = 매출 × 90% × 10% (= 9%)
-    const payout = (m.revenue || 0) * 0.9 * (store.payoutRate ?? 0.2); // 투자자 회수금 = 매출 × 90% × 회수비율
+    const payout = (m.revenue || 0) * 0.9 * 0.2; // 투자자 회수금 = 매출 × 90% × 회수비율(20%)
     const monthDays = daysInYearMonth(m.yearMonth);
     const opDays = getOperatingDays(store, m);
     totalOpDays += opDays;
@@ -872,7 +869,7 @@ function renderMonthlyTable() {
   }).join("");
 
   const totalRev = rows.reduce((s, m) => s + (m.revenue || 0), 0);
-  const totalPayout = totalRev * 0.9 * (store.payoutRate ?? 0.2); // 회수금 = 매출 × 90% × 회수비율
+  const totalPayout = totalRev * 0.9 * 0.2; // 회수금 = 매출 × 90% × 회수비율(20%)
   const totalOp = totalRev * 0.9 * 0.1;     // 운영수익 = 매출 × 90% × 10%
 
   tfoot.innerHTML = `
@@ -1612,17 +1609,6 @@ function bindEvents() {
       toggleStoreType(tChip.dataset.toggleType);
       return;
     }
-  });
-
-  // 투자자 회수 비율 드롭다운 변경
-  document.body.addEventListener("change", (e) => {
-    const sel = e.target.closest(".rate-select");
-    if (!sel) return;
-    const store = state.stores.find((s) => s.id === sel.dataset.id);
-    if (!store) return;
-    store.payoutRate = parseFloat(sel.value);
-    saveToStorage();
-    renderAll();
   });
 
   // 모달

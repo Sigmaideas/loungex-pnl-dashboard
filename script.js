@@ -37,6 +37,7 @@ function getStoreType(store) {
 const state = {
   stores: [],   // {id, name, openDate, openingProfit, operatingProfitRate, totalInvestment}
   monthly: [],  // {storeId, yearMonth, revenue, investorPayout}
+  materialRate: 0.3, // 식자재 비율(전 지점 공통). 0.1~0.3 중 선택.
   updatedAt: 0, // 마지막 로컬 수정 시각(ms). 기기 간 "가장 최근 저장본 우선" 판단용.
 };
 
@@ -157,7 +158,7 @@ const parseNumberInput = (str) => {
 function saveLocalOnly() {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({ stores: state.stores, monthly: state.monthly, updatedAt: state.updatedAt })
+    JSON.stringify({ stores: state.stores, monthly: state.monthly, materialRate: state.materialRate, updatedAt: state.updatedAt })
   );
 }
 
@@ -185,6 +186,7 @@ function loadFromStorage() {
       return false;
     state.stores = parsed.stores;
     state.monthly = parsed.monthly;
+    state.materialRate = parsed.materialRate ?? 0.3;
     state.updatedAt = parsed.updatedAt || 0;
     return true;
   } catch {
@@ -206,7 +208,7 @@ async function cloudSave({ silent = false } = {}) {
     const r = await fetch(`${CLOUD_BASE}/__data`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ stores: state.stores, monthly: state.monthly, updatedAt: state.updatedAt }),
+      body: JSON.stringify({ stores: state.stores, monthly: state.monthly, materialRate: state.materialRate, updatedAt: state.updatedAt }),
     });
     if (r.status === 401) {
       localStorage.removeItem(BARIS_TOKEN_STORAGE);
@@ -259,6 +261,7 @@ async function cloudPull() {
     // 클라우드가 더 최신 → 클라우드 채택
     state.stores = cloud.stores;
     state.monthly = cloud.monthly;
+    state.materialRate = cloud.materialRate ?? state.materialRate ?? 0.3;
     state.updatedAt = cloudTime;
     saveLocalOnly();
     return true;
@@ -298,8 +301,9 @@ function getStoreMetrics(store, startYM, endYM) {
   // 평균 매출 (월) = (누적 매출 / 운영일자) × 30
   const avgMonthlyRevenue = opDays > 0 ? (totalRevenueAll / opDays) * 30 : 0;
 
-  // 식자재비 = 평균매출 × 30%
-  const materialCost = avgMonthlyRevenue * 0.3;
+  // 식자재비 = 평균매출 × 식자재 비율
+  const materialRate = state.materialRate ?? 0.3;
+  const materialCost = avgMonthlyRevenue * materialRate;
 
   // 투자자 회수 비율(전 지점 20% 통일)
   const payoutRate = 0.2;
@@ -316,7 +320,7 @@ function getStoreMetrics(store, startYM, endYM) {
   //             - 월 임대료 - 인건비(고정 300만)
   const operatingProfit = avgMonthlyRevenue * 0.9
     - avgMonthlyPayout
-    - avgMonthlyRevenue * 0.9 * 0.3
+    - avgMonthlyRevenue * 0.9 * materialRate
     - (store.monthlyRent || 0)
     - DEFAULT_MONTHLY_LABOR;
 
@@ -335,7 +339,7 @@ function getStoreMetrics(store, startYM, endYM) {
     : 0;
   const operatingProfitFiltered = avgMonthlyRevenueFiltered * 0.9
     - avgMonthlyPayoutFiltered
-    - avgMonthlyRevenueFiltered * 0.9 * 0.3
+    - avgMonthlyRevenueFiltered * 0.9 * materialRate
     - (store.monthlyRent || 0)
     - DEFAULT_MONTHLY_LABOR;
   const companyPnlFiltered = operatingProfitFiltered;
@@ -432,6 +436,9 @@ function renderAll() {
 
   const startYM = ui.filterStart;
   const endYM = ui.filterEnd;
+
+  const matSel = document.getElementById("material-rate-select");
+  if (matSel) matSel.value = String(state.materialRate ?? 0.3);
 
   renderKPI(startYM, endYM);
   renderChart(startYM, endYM);
@@ -1567,6 +1574,13 @@ function bindEvents() {
 
   document.getElementById("btn-add-store").addEventListener("click", addStore);
   document.getElementById("btn-add-month").addEventListener("click", addMonth);
+
+  // 식자재 비율 변경(전 지점 공통)
+  document.getElementById("material-rate-select").addEventListener("change", (e) => {
+    state.materialRate = parseFloat(e.target.value);
+    saveToStorage();
+    renderAll();
+  });
 
   document.getElementById("monthly-store-select").addEventListener("change", (e) => {
     ui.selectedStoreId = e.target.value;

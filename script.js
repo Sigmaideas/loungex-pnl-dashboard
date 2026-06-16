@@ -663,7 +663,6 @@ const STORE_COLUMNS = [
   { label: "총 회수금액", sort: "totalPayout", center: true },
   { label: "회수율", sort: "recoveryRate", center: true },
   { label: "월평균 매출", sort: "avgRevenue", center: true },
-  { label: "투자자 회수 비율", center: true },
   { label: "월평균 회수금액", sort: "avgPayout", center: true },
   { label: "수익률", sort: "roi" },
   { label: "월 임대료", sort: "monthlyRent", center: true },
@@ -705,7 +704,6 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center cell-readonly">${formatCurrency(m.totalPayoutCalculated)}</td>
       <td class="num center cell-readonly">${renderRecoveryBar(m.recoveryRate, (store.totalInvestment || 0) > 0)}</td>
       <td class="num center cell-readonly">${formatCurrency(m.avgMonthlyRevenue * 0.9)}</td>
-      <td class="num center cell-readonly">20%</td>
       <td class="num center cell-readonly ${m.avgMonthlyPayout >= m.minMonthlyPayout && m.minMonthlyPayout > 0 ? "pos" : ""}">${formatCurrency(m.avgMonthlyPayout)}</td>
       <td class="num cell-readonly ${formatRoiDisplay(m.roi, m.minMonthlyPayout).cls}">${formatRoiDisplay(m.roi, m.minMonthlyPayout).text}</td>
       <td class="num center"><span class="cell-editable" data-edit="store" data-field="monthlyRent" data-id="${store.id}" data-input-type="number">${formatCurrency(store.monthlyRent || 0)}</span></td>
@@ -756,7 +754,6 @@ function renderStoreTable(startYM, endYM) {
       <td class="num center">${formatCurrency(sum.totalPayout)}</td>
       <td class="num center">${renderRecoveryBar(sum.investment > 0 ? sum.totalPayout / sum.investment : 0, sum.investment > 0)}</td>
       <td class="num center">${formatCurrency(avgRevenueAll * 0.9)}</td>
-      <td></td>
       <td class="num center ${avgPayoutAll >= sum.minPayout / Math.max(rows.length, 1) ? "pos" : ""}">${formatCurrency(avgPayoutAll)}</td>
       <td class="num ${formatRoiDisplay(avgRoi, aggregateMinPayout).cls}">${formatRoiDisplay(avgRoi, aggregateMinPayout).text}</td>
       <td class="num center">${formatCurrency(sum.monthlyRent)}</td>
